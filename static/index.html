@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>WH:Sims — Warehouse Floor Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-box">
+    <div class="login-logo"><i class="fas fa-warehouse"></i> WH:Sims</div>
+    <div class="login-sub">Warehouse Floor Plan Manager<br>Sign in to access the layout</div>
+    <div class="login-google-wrap" id="loginGoogleBtn"></div>
+    <button class="login-demo" id="loginDemoBtn" onclick="doDemoLogin()">Continue without account (demo)</button>
+    <div class="login-waiting" id="loginWaiting" style="display:none">Checking access...</div>
+  </div>
+</div>
+
+<!-- TOPBAR -->
+<header class="topbar">
+  <div class="top-left">
+    <div class="logo"><i class="fas fa-warehouse"></i>WH:Sims</div>
+    <div class="top-sep"></div>
+    <div class="wh-dims">400 × 180 ft</div>
+    <div class="top-sep"></div>
+    <div class="wh-tabs" id="whTabs">
+      <div class="wh-tab active" onclick="switchWarehouse(0)"><span class="tab-dot" style="background:#6c63ff"></span><span class="tab-label">Tent-2</span></div>
+      <div class="wh-tab" onclick="switchWarehouse(1)"><span class="tab-dot" style="background:#f59e0b"></span><span class="tab-label">Tent-3</span></div>
+    </div>
+    <div class="top-sep"></div>
+    <div class="wh-dims" id="syncStatus" style="display:flex;align-items:center;gap:4px">
+      <span id="syncDot" style="width:7px;height:7px;border-radius:50%;background:#6b7280"></span>
+      <span id="syncLabel">Offline</span>
+    </div>
+  </div>
+  <div class="top-chips" id="topChips"></div>
+  <div class="top-right">
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Light/Dark">
+      <i class="fas fa-moon t-icon t-moon"></i>
+      <i class="fas fa-sun t-icon t-sun"></i>
+    </button>
+    <button class="tut-launch" onclick="startTutorial()" title="Tutorial"><i class="fas fa-graduation-cap"></i></button>
+    <button class="btn" onclick="openCategoryModal()" title="Categories"><i class="fas fa-tags"></i></button>
+    <button class="btn btn-g" onclick="addNewZone()" title="New Zone"><i class="fas fa-plus"></i> <span class="hide-m">Zone</span></button>
+    <button class="btn" onclick="exportPNG()" title="Export PNG"><i class="fas fa-camera"></i></button>
+    <button class="btn" onclick="togglePresentation()" title="Presentation"><i class="fas fa-tv"></i></button>
+    <button class="btn" onclick="loadLayout()" title="Load"><i class="fas fa-upload"></i></button>
+    <button class="btn btn-p" onclick="saveLayout()" title="Save"><i class="fas fa-save"></i></button>
+    <div class="user-badge" id="userBadge" onclick="toggleUserMenu()" style="display:none">
+      <div class="ub-fallback" id="userAvatar">?</div>
+      <span id="userBadgeName">User</span>
+    </div>
+  </div>
+</header>
+<div class="user-menu" id="userMenu">
+  <div class="um-header">
+    <div class="um-name" id="umName">—</div>
+    <div class="um-email" id="umEmail">—</div>
+    <div style="margin-top:4px"><span class="role-tag" id="umRole">—</span></div>
+  </div>
+  <div class="um-item" id="umAdminBtn" onclick="openAdminPanel()" style="display:none">
+    <i class="fas fa-users-cog"></i> Manage Users
+  </div>
+  <div class="um-item danger" onclick="doLogout()">
+    <i class="fas fa-sign-out-alt"></i> Sign Out
+  </div>
+</div>
+<input type="file" id="fileInput" accept=".json" style="display:none">
+
+<!-- APP -->
+<div class="app">
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sb-head">
+      <span class="sb-title"><i class="fas fa-layer-group"></i>&ensp;Zones</span>
+      <button class="btn btn-i" onclick="toggleSB()"><i class="fas fa-chevron-left"></i></button>
+    </div>
+    <div class="sb-search"><input type="text" id="searchInput" placeholder="Search zones..." oninput="renderSidebar()"></div>
+    <div class="sb-body" id="sbBody"></div>
+    <div class="sb-stats" id="sbStats"></div>
+  </aside>
+
+  <!-- CANVAS -->
+  <div class="canvas-area" id="canvasArea">
+    <button class="btn btn-i sb-toggle" id="sbToggle" onclick="toggleSB()"><i class="fas fa-bars"></i></button>
+    <svg id="svg">
+      <defs>
+        <pattern id="gS" width="10" height="10" patternUnits="userSpaceOnUse">
+          <rect width="10" height="10" fill="none" stroke="var(--grid-thin)" stroke-width=".4"/>
+        </pattern>
+        <pattern id="gL" width="50" height="50" patternUnits="userSpaceOnUse">
+          <rect width="50" height="50" fill="url(#gS)"/>
+          <rect width="50" height="50" fill="none" stroke="var(--grid-thick)" stroke-width=".6"/>
+        </pattern>
+      </defs>
+      <g id="world">
+        <rect id="gridRect" x="-2000" y="-2000" width="6000" height="6000" fill="url(#gL)"/>
+        <g id="whBorder"></g>
+        <g id="zonesG"></g>
+        <g id="palletsG"></g>
+        <g id="handlesG"></g>
+        <g id="labelsG"></g>
+      </g>
+    </svg>
+    <div class="dim-badge" id="dimBadge"></div>
+    <div class="hm-legend" id="hmLegend">
+      <div class="hm-legend-title">Capacity</div>
+      <div class="hm-row"><div class="hm-swatch" style="background:#22c997"></div><span class="hm-label">0-50%</span></div>
+      <div class="hm-row"><div class="hm-swatch" style="background:#f0b429"></div><span class="hm-label">51-80%</span></div>
+      <div class="hm-row"><div class="hm-swatch" style="background:#ef4444"></div><span class="hm-label">81-100%</span></div>
+      <div class="hm-row"><div class="hm-swatch" style="background:#6b7280"></div><span class="hm-label">Not set</span></div>
+    </div>
+    <div class="ctb">
+      <button class="btn btn-i" onclick="zoomIn()" title="Zoom In"><i class="fas fa-plus"></i></button>
+      <div class="zoom-d" id="zoomD">100%</div>
+      <button class="btn btn-i" onclick="zoomOut()" title="Zoom Out"><i class="fas fa-minus"></i></button>
+      <button class="btn btn-i" onclick="zoomFit()" title="Fit"><i class="fas fa-expand"></i></button>
+      <button class="btn btn-i" id="snapBtn" onclick="toggleSnap()" title="Snap to Grid"><i class="fas fa-magnet"></i></button>
+      <button class="btn btn-i" id="heatBtn" onclick="toggleHeatMap()" title="Heat Map"><i class="fas fa-fire"></i></button>
+    </div>
+    <div class="batch-bar" id="batchBar">
+      <span class="batch-count" id="batchCount">0 selected</span>
+      <button class="btn btn-d" style="padding:5px 10px;font-size:11px" onclick="batchDelete()"><i class="fas fa-trash"></i> Delete</button>
+      <button class="btn" style="padding:5px 10px;font-size:11px" onclick="batchMoveToZone()"><i class="fas fa-arrows-alt"></i> Move</button>
+      <button class="btn btn-i" style="width:28px;height:28px;font-size:11px" onclick="clearMultiSel()" title="Deselect"><i class="fas fa-times"></i></button>
+    </div>
+  </div>
+</div>
+
+<!-- EDITOR -->
+<div class="editor" id="editor">
+  <div class="ed-head">
+    <h3 id="edTitle">Zone</h3>
+    <button class="btn btn-i" onclick="closeEditor()"><i class="fas fa-times"></i></button>
+  </div>
+  <div class="ed-body" id="edBody"></div>
+  <div class="ed-foot" id="edFoot"></div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<!-- TOAST -->
+<div class="toast-c" id="toastC"></div>
+
+<!-- PRESENTATION MODE -->
+<button class="pres-exit" onclick="togglePresentation()"><i class="fas fa-times"></i> Exit (Esc)</button>
+<div class="pres-watermark">WH:Sims — <span id="presDate"></span></div>
+
+<!-- TUTORIAL -->
+<div class="tut-overlay" id="tutOverlay">
+  <svg class="tut-mask" id="tutMask">
+    <defs>
+      <mask id="tutSpotlightMask">
+        <rect width="100%" height="100%" fill="white"/>
+        <rect id="tutSpotlightHole" rx="10" ry="10" fill="black"/>
+      </mask>
+    </defs>
+    <rect width="100%" height="100%" fill="rgba(11,13,20,0.82)" mask="url(#tutSpotlightMask)"/>
+  </svg>
+</div>
+<div class="tut-progress" id="tutProgress"><div class="tut-progress-fill" id="tutProgressFill"></div></div>
+<div class="tut-counter" id="tutCounter"></div>
+<div class="tut-pulse" id="tutPulse"></div>
+<div class="tut-card" id="tutCard">
+  <div class="tut-card-accent"></div>
+  <div class="tut-card-body">
+    <div class="tut-card-icon" id="tutCardIcon"></div>
+    <h4 id="tutCardTitle"></h4>
+    <p id="tutCardText"></p>
+  </div>
+  <div class="tut-card-nav">
+    <button class="tut-nav-btn tut-nav-back" id="tutBack" onclick="tutPrev()"><i class="fas fa-arrow-left"></i> Back</button>
+    <div class="tut-nav-dots" id="tutDots"></div>
+    <button class="tut-nav-btn tut-nav-next" id="tutNext" onclick="tutNext()">Next <i class="fas fa-arrow-right"></i></button>
+  </div>
+</div>
+<div class="tut-splash" id="tutSplash">
+  <div class="tut-splash-box" id="tutSplashBox"></div>
+</div>
+<div class="tut-ghost-zone" id="tutGhostZone"></div>
+<div class="tut-ghost-cursor" id="tutGhostCursor"><i class="fas fa-mouse-pointer"></i></div>
+
+<script src="app.js"></script>
+</body>
+</html>
