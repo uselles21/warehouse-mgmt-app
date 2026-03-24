@@ -1,5 +1,8 @@
 // state
+const LEGACY_WH = { w: 400, h: 180, unit: 'ft' };
 const WH = { w: 400, h: 180, unit: 'ft' };
+const LABEL_WH = { w: 200, h: 85 };
+const DEFAULT_PALLET = { w: 4, h: 4 };
 const API_BASE = '';
 const SAVE_DEBOUNCE_MS = 2000;
 const POLL_INTERVAL_MS = 3000;
@@ -31,6 +34,63 @@ let nextCId = 50;
 
 function zid() { return 'z' + (nextZId++); }
 function pid() { return 'p' + (nextPId++); }
+
+function round1(v) { return Math.round(v * 10) / 10; }
+
+function scaleSlotToWarehouse(slot, fromWH, toWH) {
+  if (!slot || !slot.zones || !fromWH || !toWH) return slot;
+  const sx = toWH.w / fromWH.w;
+  const sy = toWH.h / fromWH.h;
+  const out = JSON.parse(JSON.stringify(slot));
+
+  (out.zones || []).forEach(z => {
+    (z.segs || []).forEach(s => {
+      s.x = round1(s.x * sx);
+      s.y = round1(s.y * sy);
+      s.w = Math.max(2, round1(s.w * sx));
+      s.h = Math.max(2, round1(s.h * sy));
+    });
+    (z.pallets || []).forEach(p => {
+      p.x = round1(p.x * sx);
+      p.y = round1(p.y * sy);
+      p.w = Math.max(1, round1(p.w * sx));
+      p.h = Math.max(1, round1(p.h * sy));
+    });
+    if (!z.tags) z.tags = [];
+    if (z.parentId === undefined) z.parentId = null;
+  });
+
+  return out;
+}
+
+function getSlotExtent(slot) {
+  let maxX = 0, maxY = 0;
+  if (!slot || !slot.zones) return { maxX, maxY };
+  (slot.zones || []).forEach(z => {
+    (z.segs || []).forEach(s => {
+      maxX = Math.max(maxX, s.x + s.w);
+      maxY = Math.max(maxY, s.y + s.h);
+    });
+    (z.pallets || []).forEach(p => {
+      maxX = Math.max(maxX, p.x + p.w);
+      maxY = Math.max(maxY, p.y + p.h);
+    });
+  });
+  return { maxX, maxY };
+}
+
+function normalizeSlotForCurrentWarehouse(slot, srcWarehouse) {
+  if (!slot) return slot;
+  const source = (srcWarehouse && srcWarehouse.w && srcWarehouse.h) ? srcWarehouse : null;
+  if (source && (Math.abs(source.w - WH.w) > 0.1 || Math.abs(source.h - WH.h) > 0.1)) {
+    return scaleSlotToWarehouse(slot, source, WH);
+  }
+  const extent = getSlotExtent(slot);
+  if (extent.maxX > WH.w + 20 || extent.maxY > WH.h + 10) {
+    return scaleSlotToWarehouse(slot, LEGACY_WH, WH);
+  }
+  return JSON.parse(JSON.stringify(slot));
+}
 
 let zones = [
   { id:zid(), name:'Prestaging', cat:'staging', color:'#ec4899',
@@ -108,7 +168,18 @@ if (infraZones.length >= 1) infraZones[0].segs[0] = {x:295, y:142, w:50, h:33};
 if (infraZones.length >= 2) infraZones[1].segs[0] = {x:130, y:142, w:50, h:33};
 if (infraZones.length >= 3) infraZones[2].segs[0] = {x:65, y:142, w:55, h:33};
 
+({ zones } = normalizeSlotToCurrentWarehouse({ zones }, LEGACY_WH));
+
 zones.forEach(z => { if (!z.tags) z.tags = []; if (z.parentId === undefined) z.parentId = null; if (!z.pallets) z.pallets = []; if (!z.segs) z.segs = []; });
+
+if (WH.w !== LEGACY_WH.w || WH.h !== LEGACY_WH.h) {
+  const scaledDefaults = normalizeSlotForCurrentWarehouse({ zones, categories, nextZId, nextPId, nextCId }, LEGACY_WH);
+  zones = scaledDefaults.zones || zones;
+  categories = scaledDefaults.categories || categories;
+  nextZId = scaledDefaults.nextZId || nextZId;
+  nextPId = scaledDefaults.nextPId || nextPId;
+  nextCId = scaledDefaults.nextCId || nextCId;
+}
 
 function makePals(zx, zy, zw, zh, prefix, count) {
   const pals = [];
@@ -130,6 +201,132 @@ function makePals(zx, zy, zw, zh, prefix, count) {
     });
   }
   return pals;
+}
+
+function round1(v) { return Math.round(v * 10) / 10; }
+
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function inferWarehouseFromSlot(slot) {
+  if (!slot || !Array.isArray(slot.zones) || slot.zones.length === 0) return WH;
+  let maxX = 0, maxY = 0;
+  slot.zones.forEach(z => {
+    (z.segs || []).forEach(s => {
+      maxX = Math.max(maxX, (s.x || 0) + (s.w || 0));
+      maxY = Math.max(maxY, (s.y || 0) + (s.h || 0));
+    });
+    (z.pallets || []).forEach(p => {
+      maxX = Math.max(maxX, (p.x || 0) + (p.w || 0));
+      maxY = Math.max(maxY, (p.y || 0) + (p.h || 0));
+    });
+  });
+  if (maxX > WH.w * 1.15 || maxY > WH.h * 1.15) return LEGACY_WH;
+  return WH;
+}
+
+function scaleSlotToWarehouse(slot, fromWH, toWH) {
+  if (!slot) return slot;
+  if (!fromWH || !toWH || !fromWH.w || !fromWH.h || (fromWH.w === toWH.w && fromWH.h === toWH.h)) {
+    return deepClone(slot);
+  }
+  const sx = toWH.w / fromWH.w;
+  const sy = toWH.h / fromWH.h;
+  const scaled = deepClone(slot);
+  (scaled.zones || []).forEach(z => {
+    (z.segs || []).forEach(s => {
+      s.x = round1((s.x || 0) * sx);
+      s.y = round1((s.y || 0) * sy);
+      s.w = round1((s.w || 0) * sx);
+      s.h = round1((s.h || 0) * sy);
+    });
+    (z.pallets || []).forEach(p => {
+      p.x = round1((p.x || 0) * sx);
+      p.y = round1((p.y || 0) * sy);
+      p.w = round1((p.w || DEFAULT_PALLET.w) * sx);
+      p.h = round1((p.h || DEFAULT_PALLET.h) * sy);
+    });
+  });
+  return scaled;
+}
+
+function normalizeSlotToCurrentWarehouse(slot, declaredWH = null) {
+  if (!slot) return slot;
+  const fromWH = declaredWH || inferWarehouseFromSlot(slot);
+  return scaleSlotToWarehouse(slot, fromWH, WH);
+}
+
+function normalizeServerLayout(layout) {
+  if (!layout || !Array.isArray(layout.warehouses)) return layout;
+  const declaredWH = layout.warehouse && layout.warehouse.w && layout.warehouse.h ? layout.warehouse : null;
+  return {
+    warehouse: WH,
+    warehouses: layout.warehouses.map(slot => slot ? normalizeSlotToCurrentWarehouse(slot, declaredWH) : slot),
+    currentWH: layout.currentWH || 0
+  };
+}
+
+function getSegmentInnerBounds(z, segIdx = 0, pad = 2) {
+  const s = (z.segs || [])[segIdx] || z.segs[0];
+  if (!s) return null;
+  const headerPad = segIdx === 0 ? QF_HEADER + 1 : 2;
+  return {
+    x: round1(s.x + pad),
+    y: round1(s.y + headerPad),
+    w: round1(Math.max(0, s.w - pad * 2)),
+    h: round1(Math.max(0, s.h - headerPad - pad)),
+    seg: s,
+    segIdx
+  };
+}
+
+function formatSeqLabel(prefix, num) {
+  const base = (prefix || 'P').trim() || 'P';
+  return base + num;
+}
+
+function rectsIntersect(ax, ay, aw, ah, bx, by, bw, bh, eps = 0.001) {
+  return ax < bx + bw - eps && ax + aw > bx + eps && ay < by + bh - eps && ay + ah > by + eps;
+}
+
+function getPalletsInSegment(z, segIdx = 0) {
+  const inner = getSegmentInnerBounds(z, segIdx, 0);
+  if (!inner) return [];
+  return (z.pallets || []).filter(p => rectsIntersect(
+    p.x || 0,
+    p.y || 0,
+    p.w || DEFAULT_PALLET.w,
+    p.h || DEFAULT_PALLET.h,
+    inner.x,
+    inner.y,
+    inner.w,
+    inner.h
+  ));
+}
+
+function getRowFillPlacement(z, segIdx, dir, pw, ph, gap) {
+  const inner = getSegmentInnerBounds(z, segIdx);
+  if (!inner) return null;
+  const segPallets = getPalletsInSegment(z, segIdx);
+  if (dir === 'h') {
+    const nextY = segPallets.length
+      ? Math.max(...segPallets.map(p => (p.y || 0) + (p.h || ph))) + gap
+      : inner.y;
+    const availableBand = inner.y + inner.h - nextY;
+    const maxCount = availableBand + 0.001 >= ph
+      ? Math.max(0, Math.floor((inner.w + gap) / (pw + gap)))
+      : 0;
+    return { inner, segPallets, x: inner.x, y: round1(nextY), maxCount };
+  }
+  const nextX = segPallets.length
+    ? Math.max(...segPallets.map(p => (p.x || 0) + (p.w || pw))) + gap
+    : inner.x;
+  const availableBand = inner.x + inner.w - nextX;
+  const maxCount = availableBand + 0.001 >= pw
+    ? Math.max(0, Math.floor((inner.h + gap) / (ph + gap)))
+    : 0;
+  return { inner, segPallets, x: round1(nextX), y: inner.y, maxCount };
 }
 
 let sel = { zoneId: null, segIdx: null, palletId: null };
@@ -214,7 +411,7 @@ const svg = document.getElementById('svg');
 const world = document.getElementById('world');
 const cArea = document.getElementById('canvasArea');
 
-let vb = { x: -20, y: -20, w: 440, h: 220 };
+let vb = { x: -10, y: -8, w: WH.w + 20, h: WH.h + 16 };
 let zoom = 1;
 let panning = false;
 let panStart = { x: 0, y: 0 };
@@ -308,13 +505,28 @@ function zoomOut() {
   zoom /= 1.25; applyVB();
 }
 function zoomFit() {
-  const pad = 20;
-  vb = { x: -pad, y: -pad, w: WH.w + pad * 2, h: WH.h + pad * 2 };
+  const padX = 8;
+  const padY = 6;
+  vb = { x: -padX, y: -padY, w: WH.w + padX * 2, h: WH.h + padY * 2 };
   const r = svg.getBoundingClientRect();
   const asp = r.width / r.height;
   const vAsp = vb.w / vb.h;
-  if (asp > vAsp) { const nw = vb.h * asp; vb.x -= (nw - vb.w) / 2; vb.w = nw; }
-  else { const nh = vb.w / asp; vb.y -= (nh - vb.h) / 2; vb.h = nh; }
+  if (asp > vAsp) {
+    const nw = vb.h * asp;
+    vb.x -= (nw - vb.w) / 2;
+    vb.w = nw;
+  } else {
+    const nh = vb.w / asp;
+    vb.y -= (nh - vb.h) / 2;
+    vb.h = nh;
+  }
+  const boost = 1.08;
+  const cx = vb.x + vb.w / 2;
+  const cy = vb.y + vb.h / 2;
+  vb.w /= boost;
+  vb.h /= boost;
+  vb.x = cx - vb.w / 2;
+  vb.y = cy - vb.h / 2;
   zoom = r.width / vb.w;
   applyVB();
 }
@@ -345,9 +557,9 @@ function renderSVG() {
       transform="rotate(90,${WH.w+20},${WH.h/2})">ENTRANCE</text>
     <!-- Dimension labels -->
     <text x="${WH.w/2}" y="-6" text-anchor="middle" font-family="IBM Plex Mono"
-      font-size="6" font-weight="600" fill="var(--text-3)">${WH.w}ft</text>
+      font-size="6" font-weight="600" fill="var(--text-3)">${LABEL_WH.w}ft</text>
     <text x="${WH.w/2}" y="${WH.h+12}" text-anchor="middle" font-family="IBM Plex Mono"
-      font-size="6" font-weight="600" fill="var(--text-3)">${WH.w}ft</text>
+      font-size="6" font-weight="600" fill="var(--text-3)">${LABEL_WH.w}ft</text>
     <text x="-20" y="${WH.h/2}" text-anchor="middle" font-family="IBM Plex Mono"
       font-size="5" font-weight="600" fill="var(--text-3)"
       transform="rotate(-90,-20,${WH.h/2})">${WH.h}ft</text>
@@ -961,23 +1173,25 @@ function openZoneEditor(id) {
           ${z.pallets.length > 0 ? '<button class="btn btn-d" style="padding:4px 8px;font-size:11px" onclick="clearAllPallets(\'' + id + '\')" title="Remove all"><i class="fas fa-trash"></i></button>' : ''}
         </div>
       </div>
-      <div style="display:flex;gap:4px;margin-bottom:6px">
-        <button class="btn btn-g" style="flex:1;justify-content:center;font-size:11px;padding:6px 8px" onclick="showQuickFillForm('${id}')"><i class="fas fa-th"></i> Quick Fill</button>
-        ${z.pallets.length > 0 ? '<button class="btn" style="flex:1;justify-content:center;font-size:11px;padding:6px 8px;color:var(--cyan)" onclick="selectAllPalletsInZone(\'' + id + '\')"><i class="fas fa-check-double"></i> Select All</button>' : ''}
+      <div class="zone-tool-grid">
+        <button class="btn btn-g zone-tool-btn zone-tool-btn--quick" onclick="showQuickFillForm('${id}')"><i class="fas fa-th"></i><span>Quick Fill</span></button>
+        <button class="btn zone-tool-btn zone-tool-btn--row" onclick="showRowFillForm('${id}')"><i class="fas fa-grip-lines"></i><span>Row Fill</span></button>
+        <button class="btn zone-tool-btn zone-tool-btn--pack" onclick="packZoneToSegment('${id}')"><i class="fas fa-compress-arrows-alt"></i><span>Pack to Segment</span></button>
+        ${z.pallets.length > 0 ? '<button class="btn zone-tool-btn zone-tool-btn--select" onclick="selectAllPalletsInZone(\'' + id + '\')"><i class="fas fa-check-double"></i><span>Select All</span></button>' : ''}
       </div>
-      <div id="quickFillForm" style="display:none;padding:8px;background:var(--bg-3);border-radius:var(--radius-sm);margin-bottom:6px">
-        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px"><i class="fas fa-th"></i> Quick Fill — Auto Grid</div>
+      <div id="quickFillForm" class="tool-panel" style="display:none">
+        <div class="tool-title" style="color:var(--green)"><i class="fas fa-th"></i> Quick Fill · Auto Grid</div>
         <div class="fr" style="margin-bottom:6px">
           <div class="fg" style="margin:0"><label>Pallet W (ft)</label>
-            <input type="number" id="qfPw" value="8" min="2" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
+            <input type="number" id="qfPw" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
           <div class="fg" style="margin:0"><label>Pallet H (ft)</label>
-            <input type="number" id="qfPh" value="8" min="2" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
+            <input type="number" id="qfPh" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
         </div>
         <div class="fr" style="margin-bottom:6px">
           <div class="fg" style="margin:0"><label>Gap (ft)</label>
-            <input type="number" id="qfGap" value="2" min="0" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
+            <input type="number" id="qfGap" value="1" min="0" step="0.5" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
           <div class="fg" style="margin:0;flex:2"><label>Prefix</label>
-            <input type="text" id="qfPrefix" value="P" style="font-size:13px"></div>
+            <input type="text" id="qfPrefix" value="P-" style="font-size:13px"></div>
           <div class="fg" style="margin:0;flex:1"><label>Start #</label>
             <input type="number" id="qfStart" value="1" min="0" style="font-size:13px"></div>
         </div>
@@ -985,6 +1199,38 @@ function openZoneEditor(id) {
         <div style="display:flex;gap:4px">
           <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px" onclick="doQuickFill('${id}')"><i class="fas fa-check"></i> Fill Zone</button>
           <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('quickFillForm').style.display='none'"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+      <div id="rowFillForm" class="tool-panel" style="display:none">
+        <div class="tool-title" style="color:var(--accent-h)"><i class="fas fa-grip-lines"></i> Row Fill · Clean Lines</div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0"><label>Direction</label>
+            <select id="rfDir" onchange="updateRowFillPreview('${id}')"><option value="h">Horizontal</option><option value="v">Vertical</option></select></div>
+          <div class="fg" style="margin:0"><label>Segment</label>
+            <select id="rfSeg" onchange="updateRowFillPreview('${id}')">${z.segs.map((s, i) => '<option value="' + i + '"' + ((sel.segIdx ?? 0) === i ? ' selected' : '') + '>Segment ' + (i + 1) + '</option>').join('')}</select></div>
+        </div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0"><label>Count</label>
+            <input type="number" id="rfCount" value="6" min="1" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+          <div class="fg" style="margin:0"><label>Gap (ft)</label>
+            <input type="number" id="rfGap" value="1" min="0" step="0.5" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+        </div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0"><label>Pallet W (ft)</label>
+            <input type="number" id="rfPw" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+          <div class="fg" style="margin:0"><label>Pallet H (ft)</label>
+            <input type="number" id="rfPh" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+        </div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0;flex:2"><label>Prefix</label>
+            <input type="text" id="rfPrefix" value="ROW-" style="font-size:13px"></div>
+          <div class="fg" style="margin:0;flex:1"><label>Start #</label>
+            <input type="number" id="rfStart" value="1" min="0" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+        </div>
+        <div class="qf-preview" id="rfPreview">—</div>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px" onclick="doRowFill('${id}')"><i class="fas fa-plus"></i> Add Row</button>
+          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('rowFillForm').style.display='none'"><i class="fas fa-times"></i></button>
         </div>
       </div>
       ${palsHtml}
@@ -1201,7 +1447,7 @@ function addPallet(zid) {
   if (!z) return;
   const s = z.segs[0];
   const pId = pid();
-  const pw = 8, ph = 8;
+  const pw = DEFAULT_PALLET.w, ph = DEFAULT_PALLET.h;
   const pad = 3;
   const headerH = 14;
   const gap = 2;
@@ -1262,10 +1508,19 @@ function removePal(zid, palId) {
 // quick fill
 const QF_HEADER = 14;
 
+function closeZoneToolPanels() {
+  const quick = document.getElementById('quickFillForm');
+  const row = document.getElementById('rowFillForm');
+  if (quick) quick.style.display = 'none';
+  if (row) row.style.display = 'none';
+}
+
 function showQuickFillForm(zid) {
   const form = document.getElementById('quickFillForm');
   if (!form) return;
-  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  const shouldOpen = form.style.display === 'none';
+  closeZoneToolPanels();
+  form.style.display = shouldOpen ? 'block' : 'none';
   if (form.style.display === 'block') {
     updateQfPreview(zid);
     setTimeout(() => { const inp = document.getElementById('qfPw'); if (inp) inp.focus(); }, 50);
@@ -1276,8 +1531,8 @@ function updateQfPreview(zid) {
   const z = zones.find(zz => zz.id === zid);
   if (!z) return;
   const s = z.segs[0];
-  const pw = parseFloat(document.getElementById('qfPw').value) || 8;
-  const ph = parseFloat(document.getElementById('qfPh').value) || 8;
+  const pw = parseFloat(document.getElementById('qfPw').value) || DEFAULT_PALLET.w;
+  const ph = parseFloat(document.getElementById('qfPh').value) || DEFAULT_PALLET.h;
   const gap = parseFloat(document.getElementById('qfGap').value) || 2;
   const pad = 2;
   const availW = s.w - pad * 2;
@@ -1304,8 +1559,8 @@ function doQuickFill(zid) {
   if (!z) return;
   const s = z.segs[0];
 
-  const pw = parseFloat(document.getElementById('qfPw').value) || 8;
-  const ph = parseFloat(document.getElementById('qfPh').value) || 8;
+  const pw = parseFloat(document.getElementById('qfPw').value) || DEFAULT_PALLET.w;
+  const ph = parseFloat(document.getElementById('qfPh').value) || DEFAULT_PALLET.h;
   const gap = parseFloat(document.getElementById('qfGap').value) || 2;
   const prefix = (document.getElementById('qfPrefix').value || '').trim() || 'P';
   const startNum = parseInt(document.getElementById('qfStart').value) || 1;
@@ -1350,6 +1605,156 @@ function doQuickFill(zid) {
       doFill);
   } else {
     doFill();
+  }
+}
+
+
+function showRowFillForm(zid) {
+  const form = document.getElementById('rowFillForm');
+  if (!form) return;
+  const shouldOpen = form.style.display === 'none';
+  closeZoneToolPanels();
+  form.style.display = shouldOpen ? 'block' : 'none';
+  if (form.style.display === 'block') {
+    updateRowFillPreview(zid);
+    setTimeout(() => { const inp = document.getElementById('rfPrefix'); if (inp) inp.focus(); }, 50);
+  }
+}
+
+function updateRowFillPreview(zid) {
+  const z = zones.find(zz => zz.id === zid);
+  if (!z) return;
+  const segIdx = parseInt(document.getElementById('rfSeg').value || (sel.segIdx ?? 0), 10) || 0;
+  const dir = document.getElementById('rfDir').value || 'h';
+  const count = Math.max(1, parseInt(document.getElementById('rfCount').value || '1', 10));
+  const gap = parseFloat(document.getElementById('rfGap').value) || 0;
+  const pw = parseFloat(document.getElementById('rfPw').value) || DEFAULT_PALLET.w;
+  const ph = parseFloat(document.getElementById('rfPh').value) || DEFAULT_PALLET.h;
+  const prefix = (document.getElementById('rfPrefix').value || 'ROW-').trim() || 'ROW-';
+  const startNum = parseInt(document.getElementById('rfStart').value || '1', 10) || 1;
+  const placement = getRowFillPlacement(z, segIdx, dir, pw, ph, gap);
+  const el = document.getElementById('rfPreview');
+  if (!el || !placement) return;
+
+  const actual = Math.min(count, placement.maxCount);
+  const labels = actual > 0
+    ? formatSeqLabel(prefix, startNum) + ' → ' + formatSeqLabel(prefix, startNum + actual - 1)
+    : formatSeqLabel(prefix, startNum);
+  let msg = (dir === 'h' ? 'Horizontal' : 'Vertical') + ' row, segment ' + (segIdx + 1) + ' · ' + labels;
+
+  if (placement.maxCount <= 0) {
+    msg += ' · no free space for another ' + (dir === 'h' ? 'row' : 'column');
+    el.style.color = 'var(--red)';
+  } else if (actual < count) {
+    msg += ' · requested ' + count + ', fits ' + actual;
+    el.style.color = 'var(--yellow)';
+  } else {
+    msg += ' · fits ' + actual;
+    el.style.color = 'var(--accent-h)';
+  }
+
+  el.textContent = msg;
+}
+
+function doRowFill(zid) {
+  const z = zones.find(zz => zz.id === zid);
+  if (!z) return;
+  const segIdx = parseInt(document.getElementById('rfSeg').value || (sel.segIdx ?? 0), 10) || 0;
+  const dir = document.getElementById('rfDir').value || 'h';
+  const requested = Math.max(1, parseInt(document.getElementById('rfCount').value || '1', 10));
+  const gap = parseFloat(document.getElementById('rfGap').value) || 0;
+  const pw = parseFloat(document.getElementById('rfPw').value) || DEFAULT_PALLET.w;
+  const ph = parseFloat(document.getElementById('rfPh').value) || DEFAULT_PALLET.h;
+  const prefix = (document.getElementById('rfPrefix').value || 'ROW-').trim() || 'ROW-';
+  const startNum = parseInt(document.getElementById('rfStart').value || '1', 10) || 1;
+  const placement = getRowFillPlacement(z, segIdx, dir, pw, ph, gap);
+
+  if (!placement || placement.maxCount <= 0) {
+    toast('No free space for another ' + (dir === 'h' ? 'row' : 'column') + ' in this segment', 'err');
+    return;
+  }
+
+  const actual = Math.min(requested, placement.maxCount);
+  const newPallets = [];
+  for (let i = 0; i < actual; i++) {
+    const px = dir === 'h' ? placement.x + i * (pw + gap) : placement.x;
+    const py = dir === 'h' ? placement.y : placement.y + i * (ph + gap);
+    newPallets.push({
+      id: pid(),
+      label: formatSeqLabel(prefix, startNum + i),
+      x: round1(px),
+      y: round1(py),
+      w: pw,
+      h: ph
+    });
+  }
+
+  z.pallets.push(...newPallets);
+  renderAll();
+  openZoneEditor(zid);
+  if (actual < requested) {
+    toast('Placed ' + actual + ' of ' + requested + ' requested pallets in segment ' + (segIdx + 1), 'inf');
+  } else {
+    toast(actual + ' row pallets added in segment ' + (segIdx + 1), 'ok');
+  }
+}
+
+function packZoneToSegment(zid) {
+  const z = zones.find(zz => zz.id === zid);
+  if (!z || !z.pallets || z.pallets.length === 0) { toast('No pallets to pack', 'err'); return; }
+  const segIdx = sel.segIdx != null ? sel.segIdx : 0;
+  const inner = getSegmentInnerBounds(z, segIdx);
+  if (!inner) { toast('No segment selected', 'err'); return; }
+
+  const targetPallets = getPalletsInSegment(z, segIdx);
+  if (targetPallets.length === 0) {
+    toast('No pallets found in selected segment', 'err');
+    return;
+  }
+
+  const ordered = [...targetPallets].sort((a, b) => {
+    const la = String(a.label || '');
+    const lb = String(b.label || '');
+    return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  let cx = inner.x;
+  let cy = inner.y;
+  let rowH = 0;
+  const gap = 0.75;
+  const packed = [];
+  const leftover = [];
+
+  for (const p of ordered) {
+    const pw = p.w || DEFAULT_PALLET.w;
+    const ph = p.h || DEFAULT_PALLET.h;
+    if (cx + pw > inner.x + inner.w + 0.001) {
+      cx = inner.x;
+      cy += rowH + gap;
+      rowH = 0;
+    }
+    if (cy + ph > inner.y + inner.h + 0.001) {
+      leftover.push(p);
+      continue;
+    }
+    packed.push({ id: p.id, x: round1(cx), y: round1(cy), w: pw, h: ph });
+    cx += pw + gap;
+    rowH = Math.max(rowH, ph);
+  }
+
+  if (packed.length === 0) {
+    toast('Selected segment is too small to pack these pallets', 'err');
+    return;
+  }
+
+  const posMap = new Map(packed.map(p => [p.id, p]));
+  z.pallets = z.pallets.map(p => posMap.has(p.id) ? Object.assign({}, p, posMap.get(p.id)) : p);
+  renderAll();
+  openZoneEditor(zid);
+  if (leftover.length > 0) {
+    toast('Packed ' + packed.length + ' pallets, ' + leftover.length + ' left untouched', 'inf');
+  } else {
+    toast('Packed ' + packed.length + ' pallets into segment ' + (segIdx + 1), 'ok');
   }
 }
 
@@ -1757,17 +2162,25 @@ function loadLayout() {
     reader.onload = e => {
       try {
         const d = JSON.parse(e.target.result);
-              if (d.warehouses) {
-          warehouseData = d.warehouses;
-          currentWH = d.currentWH || 0;
+        if (d.warehouses) {
+          const normalized = normalizeServerLayout(d);
+          warehouseData = normalized.warehouses;
+          currentWH = normalized.currentWH || 0;
           if (warehouseData[currentWH]) loadSlotToCurrent(warehouseData[currentWH]);
         } else if (d.zones) {
-          zones = d.zones;
+          const normalizedSlot = normalizeSlotToCurrentWarehouse({
+            zones: d.zones,
+            categories: d.categories,
+            nextZId: d.nextZId,
+            nextPId: d.nextPId,
+            nextCId: d.nextCId
+          }, d.warehouse);
+          zones = normalizedSlot.zones;
           zones.forEach(z => { if (!z.tags) z.tags = []; if (z.parentId === undefined) z.parentId = null; if (!z.pallets) z.pallets = []; if (!z.segs) z.segs = []; });
-          if (d.categories) categories = d.categories;
-          if (d.nextZId) nextZId = d.nextZId;
-          if (d.nextPId) nextPId = d.nextPId;
-          if (d.nextCId) nextCId = d.nextCId;
+          if (normalizedSlot.categories) categories = normalizedSlot.categories;
+          if (normalizedSlot.nextZId) nextZId = normalizedSlot.nextZId;
+          if (normalizedSlot.nextPId) nextPId = normalizedSlot.nextPId;
+          if (normalizedSlot.nextCId) nextCId = normalizedSlot.nextCId;
           warehouseData[currentWH] = saveCurrentToSlot();
         }
         WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
@@ -2140,6 +2553,7 @@ function applyWarehouseTheme(idx) {
 
 function applyServerLayout(layout) {
   if (!layout || !Array.isArray(layout.warehouses)) return false;
+  layout = normalizeServerLayout(layout);
 
   const localCurrentWH = [0, 1].includes(currentWH) ? currentWH : 0;
   const localFallback = saveCurrentToSlot();
@@ -2364,7 +2778,7 @@ const tutSteps = [
     target: '#syncStatus',
     icon: 'fa-cloud',
     title: 'Sync Status',
-    text: 'Shows whether your data is syncing to the <strong>cloud</strong> (Firebase) or stored <strong>locally</strong> only. When connected, all changes sync in real-time across devices.',
+    text: 'Shows whether your data is syncing with the <strong>server</strong>. When connected, changes are auto-saved and reflected across active sessions.',
     spotlight: 'el',
     cardPos: 'below',
   },
@@ -2465,7 +2879,7 @@ const tutSteps = [
     target: '.top-right .btn[title="Save"]',
     icon: 'fa-save',
     title: 'Save & Load',
-    text: 'Download your layout as a <strong>JSON file</strong> for backup, or load a previously saved file. When connected to Firebase, data also auto-saves to the cloud.',
+    text: 'Download your layout as a <strong>JSON file</strong> for backup, or load a previously saved file. The working layout also auto-saves to the server.',
     spotlight: 'el',
     cardPos: 'below',
   },
