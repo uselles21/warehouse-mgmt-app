@@ -1,23 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>WH:Sims — Warehouse Floor Plan</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&amp;family=Outfit:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<!-- LOGIN -->
-<div class="login-overlay" id="loginOverlay">
+<!-- LOGIN (auto-skipped in Canvas mode) -->
+<div class="login-overlay" id="loginOverlay" style="display:none">
   <div class="login-box">
     <div class="login-logo"><i class="fas fa-warehouse"></i> WH:Sims</div>
     <div class="login-sub">Warehouse Floor Plan Manager<br>Sign in to access the layout</div>
-    <div class="login-google-wrap" id="loginGoogleBtn"></div>
+    <button class="login-google" id="loginGoogleBtn" onclick="doGoogleLogin()">
+      <svg viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path><path fill="#FBBC05" d="M10.53 28.59A14.5 14.5 0 019.5 24c0-1.59.28-3.14.76-4.59l-7.98-6.19A23.99 23.99 0 000 24c0 3.77.9 7.34 2.56 10.56l7.97-5.97z"></path><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 5.97C6.51 42.62 14.62 48 24 48z"></path></svg>
+      Sign in with Google
+    </button>
     <button class="login-demo" id="loginDemoBtn" onclick="doDemoLogin()">Continue without account (demo)</button>
     <div class="login-waiting" id="loginWaiting" style="display:none">Checking access...</div>
   </div>
@@ -28,11 +28,11 @@
   <div class="top-left">
     <div class="logo"><i class="fas fa-warehouse"></i>WH:Sims</div>
     <div class="top-sep"></div>
-    <div class="wh-dims">200 × 85 ft</div>
+    <div class="wh-dims" id="whDimsLabel">200 × 85 ft</div>
     <div class="top-sep"></div>
     <div class="wh-tabs" id="whTabs">
-      <div class="wh-tab active" onclick="switchWarehouse(0)"><span class="tab-dot" style="background:#6c63ff"></span><span class="tab-label">Tent-2</span></div>
-      <div class="wh-tab" onclick="switchWarehouse(1)"><span class="tab-dot" style="background:#f59e0b"></span><span class="tab-label">Tent-3</span></div>
+      <div class="wh-tab active" onclick="switchWarehouse(0)"><span class="tab-dot" style="background:#f59e0b"></span><span class="tab-label">Tent-3</span></div>
+      <div class="wh-tab" onclick="switchWarehouse(1)"><span class="tab-dot" style="background:#10b981"></span><span class="tab-label">Tent-4</span></div>
     </div>
     <div class="top-sep"></div>
     <div class="wh-dims" id="syncStatus" style="display:flex;align-items:center;gap:4px">
@@ -49,6 +49,7 @@
     <button class="tut-launch" onclick="startTutorial()" title="Tutorial"><i class="fas fa-graduation-cap"></i></button>
     <button class="btn" onclick="openCategoryModal()" title="Categories"><i class="fas fa-tags"></i></button>
     <button class="btn btn-g" onclick="addNewZone()" title="New Zone"><i class="fas fa-plus"></i> <span class="hide-m">Zone</span></button>
+    <button class="btn btn-gl" onclick="addGasLight()" title="Add Gas Light"><i class="fas fa-lightbulb"></i> <span class="hide-m">Light</span></button>
     <button class="btn" onclick="exportPNG()" title="Export PNG"><i class="fas fa-camera"></i></button>
     <button class="btn" onclick="togglePresentation()" title="Presentation"><i class="fas fa-tv"></i></button>
     <button class="btn" onclick="loadLayout()" title="Load"><i class="fas fa-upload"></i></button>
@@ -79,7 +80,7 @@
   <!-- SIDEBAR -->
   <aside class="sidebar" id="sidebar">
     <div class="sb-head">
-      <span class="sb-title"><i class="fas fa-layer-group"></i>&ensp;Zones</span>
+      <span class="sb-title"><i class="fas fa-layer-group"></i> Zones</span>
       <button class="btn btn-i" onclick="toggleSB()"><i class="fas fa-chevron-left"></i></button>
     </div>
     <div class="sb-search"><input type="text" id="searchInput" placeholder="Search zones..." oninput="renderSidebar()"></div>
@@ -93,17 +94,18 @@
     <svg id="svg">
       <defs>
         <pattern id="gS" width="10" height="10" patternUnits="userSpaceOnUse">
-          <rect width="10" height="10" fill="none" stroke="var(--grid-thin)" stroke-width=".4"/>
+          <rect width="10" height="10" fill="none" stroke="var(--grid-thin)" stroke-width=".4"></rect>
         </pattern>
         <pattern id="gL" width="50" height="50" patternUnits="userSpaceOnUse">
-          <rect width="50" height="50" fill="url(#gS)"/>
-          <rect width="50" height="50" fill="none" stroke="var(--grid-thick)" stroke-width=".6"/>
+          <rect width="50" height="50" fill="url(#gS)"></rect>
+          <rect width="50" height="50" fill="none" stroke="var(--grid-thick)" stroke-width=".6"></rect>
         </pattern>
       </defs>
       <g id="world">
-        <rect id="gridRect" x="-2000" y="-2000" width="6000" height="6000" fill="url(#gL)"/>
+        <rect id="gridRect" x="-2000" y="-2000" width="8000" height="8000" fill="url(#gL)"></rect>
         <g id="whBorder"></g>
         <g id="zonesG"></g>
+        <g id="gasLightsG"></g>
         <g id="palletsG"></g>
         <g id="handlesG"></g>
         <g id="labelsG"></g>
@@ -161,11 +163,11 @@
   <svg class="tut-mask" id="tutMask">
     <defs>
       <mask id="tutSpotlightMask">
-        <rect width="100%" height="100%" fill="white"/>
-        <rect id="tutSpotlightHole" rx="10" ry="10" fill="black"/>
+        <rect width="100%" height="100%" fill="white"></rect>
+        <rect id="tutSpotlightHole" rx="10" ry="10" fill="black"></rect>
       </mask>
     </defs>
-    <rect width="100%" height="100%" fill="rgba(11,13,20,0.82)" mask="url(#tutSpotlightMask)"/>
+    <rect width="100%" height="100%" fill="rgba(11,13,20,0.82)" mask="url(#tutSpotlightMask)"></rect>
   </svg>
 </div>
 <div class="tut-progress" id="tutProgress"><div class="tut-progress-fill" id="tutProgressFill"></div></div>
@@ -191,5 +193,7 @@
 <div class="tut-ghost-cursor" id="tutGhostCursor"><i class="fas fa-mouse-pointer"></i></div>
 
 <script src="app.js"></script>
-</body>
-</html>
+
+
+
+</body></html>

@@ -1,6 +1,10 @@
 // state
 const LEGACY_WH = { w: 400, h: 180, unit: 'ft' };
-const WH = { w: 400, h: 180, unit: 'ft' };
+const WH_CONFIGS = [
+  { key: 'tent3', name: 'Tent-3', w: 400, h: 180, lw: 200, lh: 85, unit: 'ft' },
+  { key: 'tent4', name: 'Tent-4', w: 800, h: 360, lw: 400, lh: 170, unit: 'ft' },
+];
+let WH = { ...WH_CONFIGS[0] };
 const LABEL_WH = { w: 200, h: 85 };
 const DEFAULT_PALLET = { w: 4, h: 4 };
 const API_BASE = '';
@@ -32,35 +36,42 @@ let nextZId = 100;
 let nextPId = 1000;
 let nextCId = 50;
 
+let gasLights = [];
+let nextGLId = 1;
+function glid() { return 'gl' + (nextGLId++); }
+
 function zid() { return 'z' + (nextZId++); }
 function pid() { return 'p' + (nextPId++); }
 
 function round1(v) { return Math.round(v * 10) / 10; }
 
 function scaleSlotToWarehouse(slot, fromWH, toWH) {
-  if (!slot || !slot.zones || !fromWH || !toWH) return slot;
+  if (!slot) return slot;
+  if (!fromWH || !toWH || !fromWH.w || !fromWH.h || (fromWH.w === toWH.w && fromWH.h === toWH.h)) {
+    return deepClone(slot);
+  }
   const sx = toWH.w / fromWH.w;
   const sy = toWH.h / fromWH.h;
-  const out = JSON.parse(JSON.stringify(slot));
-
-  (out.zones || []).forEach(z => {
+  const scaled = deepClone(slot);
+  (scaled.zones || []).forEach(z => {
     (z.segs || []).forEach(s => {
-      s.x = round1(s.x * sx);
-      s.y = round1(s.y * sy);
-      s.w = Math.max(2, round1(s.w * sx));
-      s.h = Math.max(2, round1(s.h * sy));
+      s.x = round1((s.x || 0) * sx);
+      s.y = round1((s.y || 0) * sy);
+      s.w = round1((s.w || 0) * sx);
+      s.h = round1((s.h || 0) * sy);
     });
     (z.pallets || []).forEach(p => {
-      p.x = round1(p.x * sx);
-      p.y = round1(p.y * sy);
-      p.w = Math.max(1, round1(p.w * sx));
-      p.h = Math.max(1, round1(p.h * sy));
+      p.x = round1((p.x || 0) * sx);
+      p.y = round1((p.y || 0) * sy);
+      p.w = round1((p.w || DEFAULT_PALLET.w) * sx);
+      p.h = round1((p.h || DEFAULT_PALLET.h) * sy);
     });
-    if (!z.tags) z.tags = [];
-    if (z.parentId === undefined) z.parentId = null;
   });
-
-  return out;
+  (scaled.gasLights || []).forEach(gl => {
+    gl.x = round1((gl.x || 0) * sx);
+    gl.y = round1((gl.y || 0) * sy);
+  });
+  return scaled;
 }
 
 function getSlotExtent(slot) {
@@ -259,11 +270,19 @@ function normalizeSlotToCurrentWarehouse(slot, declaredWH = null) {
 
 function normalizeServerLayout(layout) {
   if (!layout || !Array.isArray(layout.warehouses)) return layout;
-  const declaredWH = layout.warehouse && layout.warehouse.w && layout.warehouse.h ? layout.warehouse : null;
+  const migrated = migrateLegacyWarehouses(layout.warehouses);
   return {
-    warehouse: WH,
-    warehouses: layout.warehouses.map(slot => slot ? normalizeSlotToCurrentWarehouse(slot, declaredWH) : slot),
-    currentWH: layout.currentWH || 0
+    warehouse: WH_CONFIGS[currentWH] || WH,
+    warehouses: migrated.map((slot, idx) => {
+      if (!slot) return slot;
+      const declared = slot.warehouse && slot.warehouse.w && slot.warehouse.h ? slot.warehouse : (idx === 0 ? LEGACY_WH : WH_CONFIGS[idx]);
+      const normalized = normalizeSlotToCurrentWarehouse(slot, declared);
+      normalized.warehouse = { ...WH_CONFIGS[idx] };
+      if (!normalized.gasLights) normalized.gasLights = [];
+      if (!normalized.nextGLId) normalized.nextGLId = 1;
+      return normalized;
+    }),
+    currentWH: 0
   };
 }
 
@@ -329,7 +348,7 @@ function getRowFillPlacement(z, segIdx, dir, pw, ph, gap) {
   return { inner, segPallets, x: round1(nextX), y: inner.y, maxCount };
 }
 
-let sel = { zoneId: null, segIdx: null, palletId: null };
+let sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null };
 let multiSel = []; // {zid, pid}[]
 let snap = true;
 let heatMapOn = false;
@@ -340,14 +359,17 @@ const SNAP_GRID = 5;
    ================================================================= */
 let currentWH = Number(localStorage.getItem('whsims.currentWH') || '0');
 if (![0, 1].includes(currentWH)) currentWH = 0;
-const WH_THEMES = ['', 'wh2']; // CSS class per warehouse
-const WH_ACCENTS = ['#6c63ff', '#f59e0b']; // tab dot colors
+const WH_THEMES = ['wh2', 'wh3']; // Tent-3 orange, Tent-4 green
+const WH_ACCENTS = ['#f59e0b', '#10b981'];
 
 function saveCurrentToSlot() {
   return {
     zones: JSON.parse(JSON.stringify(zones)),
     categories: JSON.parse(JSON.stringify(categories)),
-    nextZId, nextPId, nextCId
+    nextZId, nextPId, nextCId,
+    gasLights: JSON.parse(JSON.stringify(gasLights || [])),
+    nextGLId,
+    warehouse: { ...WH_CONFIGS[currentWH] }
   };
 }
 
@@ -358,10 +380,38 @@ function loadSlotToCurrent(slot) {
   nextZId = slot.nextZId || nextZId;
   nextPId = slot.nextPId || nextPId;
   nextCId = slot.nextCId || nextCId;
+  gasLights = slot.gasLights || [];
+  nextGLId = slot.nextGLId || nextGLId;
 }
 
 let warehouseData = [null, null]; // filled in init
 
+function migrateLegacyWarehouses(warehouses) {
+  if (!Array.isArray(warehouses)) return [null, null];
+  const slots = warehouses.slice();
+  const hasMetadata = slots.some(slot => slot && slot.warehouse && slot.warehouse.key);
+  if (hasMetadata) return slots.slice(0, 2);
+  // Legacy 2-slot layout was Tent-2 / Tent-3. New UI is Tent-3 / Tent-4.
+  if (slots.length === 2) {
+    return [slots[1] || null, null];
+  }
+  // Legacy 3-slot layout was Tent-2 / Tent-3 / Tent-4.
+  if (slots.length >= 3) {
+    return [slots[1] || null, slots[2] || null];
+  }
+  return [slots[0] || null, slots[1] || null];
+}
+
+function applyWarehouseTheme(idx) {
+  WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
+  if (WH_THEMES[idx]) document.body.classList.add(WH_THEMES[idx]);
+  WH = { ...WH_CONFIGS[idx] };
+  const label = document.getElementById('whDimsLabel');
+  if (label) label.textContent = `${WH.lw || WH.w} × ${WH.lh || WH.h} ft`;
+  document.querySelectorAll('.wh-tab').forEach((tab, i) => {
+    tab.classList.toggle('active', i === idx);
+  });
+}
 
 function switchWarehouse(idx) {
   if (idx === currentWH) return;
@@ -372,21 +422,17 @@ function switchWarehouse(idx) {
     loadSlotToCurrent(warehouseData[idx]);
   } else {
     zones = [];
-    categories = JSON.parse(JSON.stringify(warehouseData[0].categories));
-    nextZId = 500; nextPId = 5000; nextCId = 100;
+    gasLights = [];
+    categories = JSON.parse(JSON.stringify((warehouseData[0] && warehouseData[0].categories) || categories));
+    nextZId = 500; nextPId = 5000; nextCId = 100; nextGLId = 1;
     warehouseData[idx] = saveCurrentToSlot();
   }
-  WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
-  if (WH_THEMES[idx]) document.body.classList.add(WH_THEMES[idx]);
-  document.querySelectorAll('.wh-tab').forEach((tab, i) => {
-    tab.classList.toggle('active', i === idx);
-  });
-  sel = { zoneId: null, segIdx: null, palletId: null };
+  applyWarehouseTheme(idx);
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null };
   closeEditor();
   renderAll();
   setTimeout(zoomFit, 50);
-  const tentNames = ['Tent-2', 'Tent-3'];
-  toast('Switched to ' + (tentNames[idx] || 'Tent-' + (idx + 2)), 'inf');
+  toast('Switched to ' + (WH_CONFIGS[idx]?.name || ('Tent-' + (idx + 3))), 'inf');
 }
 
 
@@ -557,12 +603,12 @@ function renderSVG() {
       transform="rotate(90,${WH.w+20},${WH.h/2})">ENTRANCE</text>
     <!-- Dimension labels -->
     <text x="${WH.w/2}" y="-6" text-anchor="middle" font-family="IBM Plex Mono"
-      font-size="6" font-weight="600" fill="var(--text-3)">${LABEL_WH.w}ft</text>
+      font-size="6" font-weight="600" fill="var(--text-3)">${WH.lw || WH.w}ft</text>
     <text x="${WH.w/2}" y="${WH.h+12}" text-anchor="middle" font-family="IBM Plex Mono"
-      font-size="6" font-weight="600" fill="var(--text-3)">${LABEL_WH.w}ft</text>
+      font-size="6" font-weight="600" fill="var(--text-3)">${WH.lw || WH.w}ft</text>
     <text x="-20" y="${WH.h/2}" text-anchor="middle" font-family="IBM Plex Mono"
       font-size="5" font-weight="600" fill="var(--text-3)"
-      transform="rotate(-90,-20,${WH.h/2})">${WH.h}ft</text>
+      transform="rotate(-90,-20,${WH.h/2})">${WH.lh || WH.h}ft</text>
   `;
 
   // Zones
@@ -735,6 +781,53 @@ function renderSVG() {
       }
     });
   });
+
+  const glG = document.getElementById('gasLightsG');
+  if (glG) {
+    glG.innerHTML = '';
+    (gasLights || []).forEach(gl => {
+      const r = 4;
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'gl-obj' + (sel.gasLightId === gl.id ? ' sel' : ''));
+      g.setAttribute('data-glid', gl.id);
+
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', gl.x);
+      circle.setAttribute('cy', gl.y);
+      circle.setAttribute('r', r);
+      circle.setAttribute('fill', gl.status === 'on' ? '#f0b429' : '#6b7280');
+      circle.setAttribute('stroke', gl.status === 'on' ? '#fbbf24' : '#4b5563');
+      circle.setAttribute('stroke-width', '1');
+      circle.setAttribute('opacity', gl.status === 'on' ? '0.9' : '0.6');
+      g.appendChild(circle);
+
+      if (gl.status === 'on') {
+        const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        glow.setAttribute('cx', gl.x);
+        glow.setAttribute('cy', gl.y);
+        glow.setAttribute('r', r + 3);
+        glow.setAttribute('fill', 'none');
+        glow.setAttribute('stroke', '#fbbf24');
+        glow.setAttribute('stroke-width', '0.5');
+        glow.setAttribute('opacity', '0.4');
+        g.appendChild(glow);
+      }
+
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', gl.x);
+      label.setAttribute('y', gl.y + r + 5);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('font-family', 'IBM Plex Mono');
+      label.setAttribute('font-size', '3.5');
+      label.setAttribute('font-weight', '600');
+      label.setAttribute('fill', cssVar('--text-2'));
+      label.textContent = gl.name || 'Light';
+      g.appendChild(label);
+
+      g.addEventListener('pointerdown', e => startGasLightDrag(e, gl.id));
+      glG.appendChild(g);
+    });
+  }
 
   // Resize handles
   renderHandles();
@@ -987,8 +1080,8 @@ function hideDimBadge() { document.getElementById('dimBadge').classList.remove('
    CLICK EMPTY — DESELECT
    ================================================================= */
 svg.addEventListener('click', e => {
-  if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh')) {
-    sel.zoneId = null; sel.palletId = null; sel.segIdx = null;
+  if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh') && !e.target.closest('.gl-obj')) {
+    sel.zoneId = null; sel.palletId = null; sel.segIdx = null; sel.gasLightId = null;
     if (multiSel.length > 0) { multiSel = []; updateBatchBar(); }
     closeEditor();
     renderAll();
@@ -1044,6 +1137,19 @@ function renderSidebar() {
       html += '<div class="cat-head">Uncategorized</div>';
       topNone.forEach(z => { html += renderZI(z, false); });
     }
+  }
+
+  if (gasLights && gasLights.length > 0) {
+    let glHtml = '<div class="cat-head"><div class="cat-dot" style="background:#f0b429"></div>GAS LIGHTS</div>';
+    gasLights.forEach(gl => {
+      const isAct = sel.gasLightId === gl.id;
+      glHtml += '<div class="gl-item' + (isAct ? ' act' : '') + '" onclick="selectGasLight(\'' + gl.id + '\')">';
+      glHtml += '<i class="fas fa-lightbulb gl-icon"></i>';
+      glHtml += '<div class="gl-info"><div class="gl-name">' + esc(gl.name) + '</div>';
+      glHtml += '<div class="gl-meta"><span class="gl-dot ' + gl.status + '"></span> ' + (gl.status === 'on' ? 'Working' : 'Not working') + '</div></div>';
+      glHtml += '</div>';
+    });
+    html += glHtml;
   }
 
   body.innerHTML = html || '<div style="text-align:center;padding:30px;color:var(--text-3)"><i class="fas fa-search" style="font-size:24px;display:block;margin-bottom:8px"></i>Nothing found</div>';
@@ -2186,7 +2292,7 @@ function loadLayout() {
         WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
         if (WH_THEMES[currentWH]) document.body.classList.add(WH_THEMES[currentWH]);
         document.querySelectorAll('.wh-tab').forEach((tab, i) => tab.classList.toggle('active', i === currentWH));
-        sel = { zoneId: null, palletId: null, segIdx: null };
+        sel = { zoneId: null, palletId: null, segIdx: null, gasLightId: null };
         closeEditor();
         renderAll();
         toast('Layout loaded!', 'ok');
@@ -2243,15 +2349,19 @@ document.addEventListener('keydown', e => {
     if (document.body.classList.contains('pres')) { togglePresentation(); return; }
     if (document.getElementById('modalBg').classList.contains('show')) closeModal();
     else if (document.getElementById('editor').classList.contains('open')) closeEditor();
-    else { sel.zoneId = null; sel.palletId = null; renderAll(); }
+    else { sel.zoneId = null; sel.palletId = null; sel.gasLightId = null; renderAll(); }
   }
-  if (e.key === 'Delete' && sel.zoneId && !e.target.closest('input,select,textarea')) {
-    if (multiSel.length > 0) {
-      batchDelete();
-    } else if (sel.palletId) {
-      removePal(sel.zoneId, sel.palletId);
-    } else {
-      deleteZone(sel.zoneId);
+  if (e.key === 'Delete' && !e.target.closest('input,select,textarea')) {
+    if (sel.gasLightId) {
+      deleteGasLight(sel.gasLightId);
+    } else if (sel.zoneId) {
+      if (multiSel.length > 0) {
+        batchDelete();
+      } else if (sel.palletId) {
+        removePal(sel.zoneId, sel.palletId);
+      } else {
+        deleteZone(sel.zoneId);
+      }
     }
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 'a' && sel.zoneId && !e.target.closest('input,select,textarea')) {
@@ -2410,8 +2520,8 @@ function exportPNG() {
   ctx.font = '6px IBM Plex Mono, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText(WH.w + 'ft', WH.w / 2, -10);
-  ctx.fillText(WH.w + 'ft', WH.w / 2, WH.h + 4);
+  ctx.fillText((WH.lw || WH.w) + 'ft', WH.w / 2, -10);
+  ctx.fillText((WH.lw || WH.w) + 'ft', WH.w / 2, WH.h + 4);
   ctx.textBaseline = 'bottom';
   ctx.fillStyle = expLight ? 'rgba(30,30,60,0.25)' : 'rgba(255,255,255,0.2)';
   ctx.font = '5px IBM Plex Mono, monospace';
@@ -2538,18 +2648,16 @@ function setSyncStatus(text, color) {
 function buildServerLayoutPayload() {
   warehouseData[currentWH] = saveCurrentToSlot();
   return {
-    warehouse: WH,
-    warehouses: JSON.parse(JSON.stringify(warehouseData))
+    warehouse: WH_CONFIGS[currentWH] || WH,
+    warehouses: JSON.parse(JSON.stringify(warehouseData)).map((slot, idx) => {
+      if (!slot) return slot;
+      slot.warehouse = { ...WH_CONFIGS[idx] };
+      return slot;
+    })
   };
 }
 
-function applyWarehouseTheme(idx) {
-  WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
-  if (WH_THEMES[idx]) document.body.classList.add(WH_THEMES[idx]);
-  document.querySelectorAll('.wh-tab').forEach((tab, i) => {
-    tab.classList.toggle('active', i === idx);
-  });
-}
+
 
 function applyServerLayout(layout) {
   if (!layout || !Array.isArray(layout.warehouses)) return false;
@@ -2700,9 +2808,122 @@ function stopServerPolling() {
   pollTimer = null;
 }
 
+/* =================================================================
+   GAS LIGHTS
+   ================================================================= */
+function addGasLight() {
+  const gl = {
+    id: glid(),
+    name: 'Light ' + nextGLId,
+    x: round1(WH.w / 2 + Math.random() * 20 - 10),
+    y: round1(WH.h / 2 + Math.random() * 20 - 10),
+    status: 'on',
+    notes: ''
+  };
+  gasLights.push(gl);
+  renderAll();
+  selectGasLight(gl.id);
+  toast('Gas Light added', 'ok');
+}
+
+function selectGasLight(id) {
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: id };
+  openGasLightEditor(id);
+  renderAll();
+}
+
+function startGasLightDrag(e, glId) {
+  e.stopPropagation();
+  selectGasLight(glId);
+  const gl = gasLights.find(g => g.id === glId);
+  if (!gl) return;
+  interacting = true;
+  const pt = s2svg(e.clientX, e.clientY);
+  const off = { dx: pt.x - gl.x, dy: pt.y - gl.y };
+
+  const onMove = ev => {
+    const mp = s2svg(ev.clientX, ev.clientY);
+    gl.x = Math.max(0, Math.min(WH.w, mp.x - off.dx));
+    gl.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
+    if (snap) { gl.x = Math.round(gl.x / 5) * 5; gl.y = Math.round(gl.y / 5) * 5; }
+    renderSVG();
+    showDimBadge(ev.clientX, ev.clientY, `${gl.name}: ${Math.round(gl.x)},${Math.round(gl.y)}`);
+  };
+  const onUp = () => {
+    interacting = false;
+    hideDimBadge();
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    renderAll();
+    openGasLightEditor(glId);
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+function openGasLightEditor(id) {
+  const gl = gasLights.find(g => g.id === id);
+  if (!gl) return;
+  const ed = document.getElementById('editor');
+  document.getElementById('edTitle').innerHTML = '<i class=\"fas fa-lightbulb\" style=\"color:#f0b429\"></i>&ensp;Gas Light';
+  document.getElementById('edBody').innerHTML = `
+    <div class=\"fg\">
+      <label>Name</label>
+      <input type=\"text\" id=\"glName\" value=\"${esc(gl.name)}\" oninput=\"updateGasLight('\${gl.id}\','name',this.value)\">
+    </div>
+    <div class=\"fg\">
+      <label>Status</label>
+      <select id=\"glStatus\" onchange=\"updateGasLight('\${gl.id}\','status',this.value)\">
+        <option value=\"on\"${gl.status === 'on' ? ' selected' : ''}>Working</option>
+        <option value=\"off\"${gl.status === 'off' ? ' selected' : ''}>Not Working</option>
+      </select>
+    </div>
+    <div class=\"fg\">
+      <label>Position X (ft)</label>
+      <input type=\"number\" id=\"glX\" value=\"${Math.round(gl.x)}\" onchange=\"updateGasLight('\${gl.id}\','x',+this.value)\">
+    </div>
+    <div class=\"fg\">
+      <label>Position Y (ft)</label>
+      <input type=\"number\" id=\"glY\" value=\"${Math.round(gl.y)}\" onchange=\"updateGasLight('\${gl.id}\','y',+this.value)\">
+    </div>
+    <div class=\"fg\">
+      <label>Notes</label>
+      <textarea rows=\"3\" style=\"resize:vertical\" oninput=\"updateGasLight('\${gl.id}\','notes',this.value)\">${esc(gl.notes || '')}</textarea>
+    </div>
+    <div style=\"padding:8px 0;margin-top:8px;border-top:1px solid var(--border)\">
+      <div class=\"gl-status\" style=\"font-size:12px\">
+        <span class=\"gl-dot ${gl.status}\"></span>
+        <span>${gl.status === 'on' ? 'Operational' : 'Offline'}</span>
+      </div>
+    </div>
+  `;
+  document.getElementById('edFoot').innerHTML = `
+    <button class=\"btn btn-d\" onclick=\"deleteGasLight('\${gl.id}\')\"><i class=\"fas fa-trash\"></i> Delete</button>
+    <button class=\"btn btn-p\" onclick=\"closeEditor()\"><i class=\"fas fa-check\"></i> Done</button>
+  `;
+  ed.classList.add('open');
+}
+
+function updateGasLight(id, field, value) {
+  const gl = gasLights.find(g => g.id === id);
+  if (!gl) return;
+  gl[field] = value;
+  renderAll();
+  if (field === 'status') openGasLightEditor(id);
+}
+
+function deleteGasLight(id) {
+  gasLights = gasLights.filter(g => g.id !== id);
+  sel.gasLightId = null;
+  closeEditor();
+  renderAll();
+  toast('Gas Light removed', 'ok');
+}
+
 function autoSave() {
   saveLayoutToServer(false);
 }
+
 
 function resetToDefaults() {
   showModal('Reset everything?', 'All zones, pallets, and categories will be reset to defaults. This cannot be undone.', async () => {
@@ -3407,18 +3628,19 @@ async function changeUserRole(email, role) {
 
 async function initGoogleAuth() {
   document.getElementById('loginDemoBtn').style.display = 'none';
+  const loginBtnHost = document.getElementById('loginGoogleBtn');
 
   try {
     const cfg = await apiFetch('/api/config');
     googleClientId = cfg.google_client_id || '';
   } catch (e) {
     console.error(e);
-    document.getElementById('loginGoogleBtn').innerHTML = '<div style="font-size:12px;color:var(--text-3)">Backend config not reachable</div>';
+    if (loginBtnHost) loginBtnHost.innerHTML = '<div style="font-size:12px;color:var(--text-3)">Backend config not reachable</div>';
     return;
   }
 
   if (!googleClientId) {
-    document.getElementById('loginGoogleBtn').innerHTML = '<div style="font-size:12px;color:var(--text-3)">Set GOOGLE_CLIENT_ID in .env first</div>';
+    if (loginBtnHost) loginBtnHost.innerHTML = '<div style="font-size:12px;color:var(--text-3)">Set GOOGLE_CLIENT_ID in .env first</div>';
     return;
   }
 
@@ -3432,14 +3654,24 @@ async function initGoogleAuth() {
       callback: handleGoogleCredential,
       auto_select: false
     });
-    google.accounts.id.renderButton(
-      document.getElementById('loginGoogleBtn'),
-      { theme: 'outline', size: 'large', width: 280, text: 'signin_with' }
-    );
+    let target = loginBtnHost;
+    if (loginBtnHost && loginBtnHost.tagName === 'BUTTON') {
+      const wrap = document.createElement('div');
+      wrap.id = 'loginGoogleBtnWrap';
+      wrap.style.display = 'inline-flex';
+      loginBtnHost.replaceWith(wrap);
+      target = wrap;
+    }
+    if (target) {
+      google.accounts.id.renderButton(
+        target,
+        { theme: 'outline', size: 'large', width: 280, text: 'signin_with' }
+      );
+    }
     googleAuthReady = true;
   };
   script.onerror = () => {
-    document.getElementById('loginGoogleBtn').innerHTML = '<div style="font-size:12px;color:var(--text-3)">Google SDK failed to load</div>';
+    if (loginBtnHost) loginBtnHost.innerHTML = '<div style="font-size:12px;color:var(--text-3)">Google SDK failed to load</div>';
   };
   document.head.appendChild(script);
 }

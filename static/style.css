@@ -28,7 +28,7 @@
   --font: 'Outfit', sans-serif;
   --mono: 'IBM Plex Mono', monospace;
   --topbar-h: 52px;
-  --sidebar-w: 280px;
+  --sidebar-w: 300px;
   --zone-text: #ffffff;
   --zone-sub: rgba(255,255,255,.45);
   --pal-text: rgba(255,255,255,.75);
@@ -711,7 +711,6 @@ html.light .tut-ghost-cursor { color:var(--text-1); filter:drop-shadow(0 2px 4px
 .login-box .login-sub {
   font-size:13px; color:var(--text-3); margin-bottom:32px; line-height:1.5;
 }
-.login-google-wrap { display:flex; justify-content:center; min-height:44px; }
 .login-google {
   display:inline-flex; align-items:center; gap:10px;
   padding:12px 28px; border-radius:10px; font-size:14px; font-weight:700;
@@ -808,3 +807,41 @@ body.role-viewer .ed-foot .btn-p { display:none !important; }
 body.role-viewer .zr { pointer-events:none !important; }
 body.role-viewer .pr { pointer-events:none !important; }
 body.role-viewer .rh { display:none !important; }
+body.role-viewer .btn-gl { display:none !important; }
+body.role-viewer .gl-obj { pointer-events:none !important; }
+
+/* Tent-4 (wh3) theme — green/emerald */
+body.wh3 { --accent:#059669; --accent-h:#10b981; --accent-glow:rgba(16,185,129,0.3);
+  --canvas-bg:#0a120e; --border-focus:#059669; }
+body.wh3 .logo { color:var(--accent-h); }
+body.wh3 .logo i { color:var(--accent); }
+body.wh3 .wh-tab.active { background:var(--accent); border-color:var(--accent); }
+html.light body.wh3 { --canvas-bg:#a8bdb5; --accent:#047857; --accent-h:#059669;
+  --accent-glow:rgba(5,150,105,0.15); }
+
+/* Gas light button */
+.btn-gl { color:#f0b429; }
+.btn-gl:hover { background:rgba(240,180,41,.1); border-color:#f0b429; }
+
+/* Gas light SVG object */
+.gl-obj { cursor:pointer; transition:opacity .12s; }
+.gl-obj:hover { opacity:.85; }
+.gl-obj.sel { filter:drop-shadow(0 0 6px rgba(240,180,41,.7)); }
+
+/* Gas light status indicator in sidebar */
+.gl-status { display:inline-flex; align-items:center; gap:4px; font-size:10px; font-weight:600; }
+.gl-status .gl-dot { width:7px; height:7px; border-radius:50%; }
+.gl-status .gl-dot.on { background:#22c997; box-shadow:0 0 4px rgba(34,201,151,.5); }
+.gl-status .gl-dot.off { background:#ef4444; box-shadow:0 0 4px rgba(239,68,68,.5); }
+
+/* Gas light sidebar item */
+.gl-item {
+  display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:var(--radius-sm);
+  cursor:pointer; transition:all .12s; border:1px solid transparent; margin-bottom:2px;
+}
+.gl-item:hover { background:var(--bg-hover); }
+.gl-item.act { background:var(--bg-hover); border-color:#f0b429; }
+.gl-item .gl-icon { color:#f0b429; font-size:13px; flex-shrink:0; }
+.gl-item .gl-info { flex:1; min-width:0; }
+.gl-item .gl-name { font-size:12px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.gl-item .gl-meta { font-size:10px; color:var(--text-3); font-family:var(--mono); }
