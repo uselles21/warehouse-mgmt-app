@@ -40,6 +40,11 @@ let gasLights = [];
 let nextGLId = 1;
 function glid() { return 'gl' + (nextGLId++); }
 
+let notes = [];
+let nextNoteId = 1;
+let addingNote = false;
+function nid() { return 'n' + (nextNoteId++); }
+
 function zid() { return 'z' + (nextZId++); }
 function pid() { return 'p' + (nextPId++); }
 
@@ -70,6 +75,10 @@ function scaleSlotToWarehouse(slot, fromWH, toWH) {
   (scaled.gasLights || []).forEach(gl => {
     gl.x = round1((gl.x || 0) * sx);
     gl.y = round1((gl.y || 0) * sy);
+  });
+  (scaled.notes || []).forEach(n => {
+    n.x = round1((n.x || 0) * sx);
+    n.y = round1((n.y || 0) * sy);
   });
   return scaled;
 }
@@ -259,6 +268,10 @@ function scaleSlotToWarehouse(slot, fromWH, toWH) {
       p.h = round1((p.h || DEFAULT_PALLET.h) * sy);
     });
   });
+  (scaled.notes || []).forEach(n => {
+    n.x = round1((n.x || 0) * sx);
+    n.y = round1((n.y || 0) * sy);
+  });
   return scaled;
 }
 
@@ -348,7 +361,7 @@ function getRowFillPlacement(z, segIdx, dir, pw, ph, gap) {
   return { inner, segPallets, x: round1(nextX), y: inner.y, maxCount };
 }
 
-let sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null };
+let sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: null };
 let multiSel = []; // {zid, pid}[]
 let snap = true;
 let heatMapOn = false;
@@ -369,6 +382,8 @@ function saveCurrentToSlot() {
     nextZId, nextPId, nextCId,
     gasLights: JSON.parse(JSON.stringify(gasLights || [])),
     nextGLId,
+    notes: JSON.parse(JSON.stringify(notes || [])),
+    nextNoteId,
     warehouse: { ...WH_CONFIGS[currentWH] }
   };
 }
@@ -382,6 +397,8 @@ function loadSlotToCurrent(slot) {
   nextCId = slot.nextCId || nextCId;
   gasLights = slot.gasLights || [];
   nextGLId = slot.nextGLId || nextGLId;
+  notes = slot.notes || [];
+  nextNoteId = slot.nextNoteId || nextNoteId;
 }
 
 let warehouseData = [null, null]; // filled in init
@@ -423,12 +440,13 @@ function switchWarehouse(idx) {
   } else {
     zones = [];
     gasLights = [];
+    notes = [];
     categories = JSON.parse(JSON.stringify((warehouseData[0] && warehouseData[0].categories) || categories));
-    nextZId = 500; nextPId = 5000; nextCId = 100; nextGLId = 1;
+    nextZId = 500; nextPId = 5000; nextCId = 100; nextGLId = 1; nextNoteId = 1;
     warehouseData[idx] = saveCurrentToSlot();
   }
   applyWarehouseTheme(idx);
-  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null };
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: null };
   closeEditor();
   renderAll();
   setTimeout(zoomFit, 50);
@@ -478,8 +496,9 @@ function doSnap(v) { return snap ? Math.round(v / SNAP_GRID) * SNAP_GRID : Math.
 let interacting = false; // true when dragging zone/pallet/handle
 
 cArea.addEventListener('pointerdown', e => {
+  if (addingNote) return;
   if (interacting) return;
-  if (e.target.closest('.zr') || e.target.closest('.pr') || e.target.closest('.rh')) return;
+  if (e.target.closest('.zr') || e.target.closest('.pr') || e.target.closest('.rh') || e.target.closest('.gl-obj') || e.target.closest('.note-obj')) return;
   if (e.target.closest('.sb-toggle') || e.target.closest('.ctb') || e.target.closest('.hm-legend') || e.target.closest('button')) return;
   panning = true;
   panStart = { x: e.clientX, y: e.clientY };
@@ -829,6 +848,8 @@ function renderSVG() {
     });
   }
 
+  renderNotes();
+
   // Resize handles
   renderHandles();
 }
@@ -1080,8 +1101,27 @@ function hideDimBadge() { document.getElementById('dimBadge').classList.remove('
    CLICK EMPTY — DESELECT
    ================================================================= */
 svg.addEventListener('click', e => {
-  if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh') && !e.target.closest('.gl-obj')) {
-    sel.zoneId = null; sel.palletId = null; sel.segIdx = null; sel.gasLightId = null;
+  if (addingNote && !e.target.closest('.gl-obj') && !e.target.closest('.note-obj')) {
+    const pt = s2svg(e.clientX, e.clientY);
+    const text = prompt('Enter note text:');
+    addingNote = false;
+    if (!text || !text.trim()) return;
+    const note = {
+      id: nid(),
+      x: doSnap(pt.x),
+      y: doSnap(pt.y),
+      text: text.trim()
+    };
+    notes.push(note);
+    sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: note.id };
+    renderAll();
+    openNoteEditor(note.id);
+    toast('Note added', 'ok');
+    return;
+  }
+
+  if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh') && !e.target.closest('.gl-obj') && !e.target.closest('.note-obj')) {
+    sel.zoneId = null; sel.palletId = null; sel.segIdx = null; sel.gasLightId = null; sel.noteId = null;
     if (multiSel.length > 0) { multiSel = []; updateBatchBar(); }
     closeEditor();
     renderAll();
@@ -1182,6 +1222,8 @@ function updateStats() {
 function selectZone(id) {
   sel.zoneId = id;
   sel.palletId = null;
+  sel.gasLightId = null;
+  sel.noteId = null;
   renderAll();
   openZoneEditor(id);
 }
@@ -2287,12 +2329,14 @@ function loadLayout() {
           if (normalizedSlot.nextZId) nextZId = normalizedSlot.nextZId;
           if (normalizedSlot.nextPId) nextPId = normalizedSlot.nextPId;
           if (normalizedSlot.nextCId) nextCId = normalizedSlot.nextCId;
+          notes = normalizedSlot.notes || [];
+          nextNoteId = normalizedSlot.nextNoteId || nextNoteId;
           warehouseData[currentWH] = saveCurrentToSlot();
         }
         WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
         if (WH_THEMES[currentWH]) document.body.classList.add(WH_THEMES[currentWH]);
         document.querySelectorAll('.wh-tab').forEach((tab, i) => tab.classList.toggle('active', i === currentWH));
-        sel = { zoneId: null, palletId: null, segIdx: null, gasLightId: null };
+        sel = { zoneId: null, palletId: null, segIdx: null, gasLightId: null, noteId: null };
         closeEditor();
         renderAll();
         toast('Layout loaded!', 'ok');
@@ -2349,10 +2393,12 @@ document.addEventListener('keydown', e => {
     if (document.body.classList.contains('pres')) { togglePresentation(); return; }
     if (document.getElementById('modalBg').classList.contains('show')) closeModal();
     else if (document.getElementById('editor').classList.contains('open')) closeEditor();
-    else { sel.zoneId = null; sel.palletId = null; sel.gasLightId = null; renderAll(); }
+    else { sel.zoneId = null; sel.palletId = null; sel.gasLightId = null; sel.noteId = null; renderAll(); }
   }
   if (e.key === 'Delete' && !e.target.closest('input,select,textarea')) {
-    if (sel.gasLightId) {
+    if (sel.noteId) {
+      deleteNote(sel.noteId);
+    } else if (sel.gasLightId) {
       deleteGasLight(sel.gasLightId);
     } else if (sel.zoneId) {
       if (multiSel.length > 0) {
@@ -2808,6 +2854,182 @@ function stopServerPolling() {
   pollTimer = null;
 }
 
+
+/* =================================================================
+   NOTES
+   ================================================================= */
+function addNoteMode() {
+  addingNote = true;
+  toast('Click on the map to place a note', 'inf');
+}
+
+function renderNotes() {
+  const nG = document.getElementById('notesG');
+  if (!nG) return;
+  nG.innerHTML = '';
+
+  (notes || []).forEach(n => {
+    const g = makeNS('g');
+    g.setAttribute('class', 'note-obj' + (sel.noteId === n.id ? ' sel' : ''));
+    g.setAttribute('data-noteid', n.id);
+
+    const circle = makeNS('circle');
+    setA(circle, {
+      cx: n.x,
+      cy: n.y,
+      r: 5,
+      fill: '#ef4444',
+      stroke: sel.noteId === n.id ? '#ffffff' : '#7f1d1d',
+      'stroke-width': sel.noteId === n.id ? 1.6 : 1.1
+    });
+    g.appendChild(circle);
+
+    const icon = makeNS('text');
+    setA(icon, {
+      x: n.x,
+      y: n.y + 1.8,
+      'text-anchor': 'middle',
+      'font-family': 'IBM Plex Mono',
+      'font-size': '4.2',
+      'font-weight': '700',
+      fill: '#ffffff',
+      'pointer-events': 'none'
+    });
+    icon.textContent = '!';
+    g.appendChild(icon);
+
+    const labelBg = makeNS('rect');
+    const labelText = String(n.text || 'Note');
+    const labelW = Math.max(18, Math.min(70, labelText.length * 2.9 + 8));
+    setA(labelBg, {
+      x: n.x + 7,
+      y: n.y - 7,
+      width: labelW,
+      height: 10,
+      rx: 2,
+      fill: 'rgba(11,13,20,0.82)',
+      stroke: 'rgba(239,68,68,0.45)',
+      'stroke-width': 0.6
+    });
+    g.appendChild(labelBg);
+
+    const text = makeNS('text');
+    setA(text, {
+      x: n.x + 11,
+      y: n.y,
+      'text-anchor': 'start',
+      'font-family': 'IBM Plex Mono',
+      'font-size': '3.5',
+      'font-weight': '600',
+      fill: '#ffffff',
+      'pointer-events': 'none'
+    });
+    text.textContent = labelText.length > 34 ? labelText.slice(0, 31) + '...' : labelText;
+    g.appendChild(text);
+
+    g.addEventListener('pointerdown', e => startNoteDrag(e, n.id));
+    g.addEventListener('dblclick', e => {
+      e.stopPropagation();
+      deleteNote(n.id);
+    });
+
+    nG.appendChild(g);
+  });
+}
+
+function selectNote(id) {
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: id };
+  renderAll();
+  openNoteEditor(id);
+}
+
+function startNoteDrag(e, noteId) {
+  e.stopPropagation();
+  selectNote(noteId);
+  const n = notes.find(x => x.id === noteId);
+  if (!n) return;
+
+  interacting = true;
+  const pt = s2svg(e.clientX, e.clientY);
+  const off = { dx: pt.x - n.x, dy: pt.y - n.y };
+
+  const onMove = ev => {
+    const mp = s2svg(ev.clientX, ev.clientY);
+    n.x = Math.max(0, Math.min(WH.w, mp.x - off.dx));
+    n.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
+    if (snap) {
+      n.x = doSnap(n.x);
+      n.y = doSnap(n.y);
+    }
+    renderAll();
+    showDimBadge(ev.clientX, ev.clientY, 'Note: ' + Math.round(n.x) + ',' + Math.round(n.y));
+  };
+
+  const onUp = () => {
+    interacting = false;
+    hideDimBadge();
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    renderAll();
+    openNoteEditor(noteId);
+  };
+
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+function openNoteEditor(id) {
+  const n = notes.find(x => x.id === id);
+  if (!n) return;
+  const ed = document.getElementById('editor');
+  document.getElementById('edTitle').textContent = '⚠️ Note';
+  document.getElementById('edBody').innerHTML = `
+    <div class="fg">
+      <label>Note</label>
+      <textarea rows="4" style="resize:vertical" oninput="updateNote('${n.id}','text',this.value)">${esc(n.text || '')}</textarea>
+    </div>
+    <div class="fr">
+      <div class="fg" style="margin:0">
+        <label>X</label>
+        <input type="number" value="${Math.round(n.x)}" onchange="updateNote('${n.id}','x',+this.value)">
+      </div>
+      <div class="fg" style="margin:0">
+        <label>Y</label>
+        <input type="number" value="${Math.round(n.y)}" onchange="updateNote('${n.id}','y',+this.value)">
+      </div>
+    </div>
+    <div class="fg" style="font-size:12px;color:var(--text-3)">
+      Drag the marker to move it. Double-click it to delete fast.
+    </div>
+  `;
+  document.getElementById('edFoot').innerHTML = `
+    <button class="btn btn-d" onclick="deleteNote('${n.id}')"><i class="fas fa-trash"></i> Delete</button>
+    <button class="btn btn-p" onclick="closeEditor()"><i class="fas fa-check"></i> Done</button>
+  `;
+  ed.classList.add('open');
+}
+
+function updateNote(id, field, value) {
+  const n = notes.find(x => x.id === id);
+  if (!n) return;
+  if (field === 'x' || field === 'y') {
+    n[field] = Math.max(0, Math.min(field === 'x' ? WH.w : WH.h, Number(value) || 0));
+  } else {
+    n[field] = value;
+  }
+  renderAll();
+}
+
+function deleteNote(id) {
+  notes = notes.filter(x => x.id !== id);
+  if (sel.noteId === id) {
+    sel.noteId = null;
+    closeEditor();
+  }
+  renderAll();
+  toast('Note deleted', 'inf');
+}
+
 /* =================================================================
    GAS LIGHTS
    ================================================================= */
@@ -2827,7 +3049,7 @@ function addGasLight() {
 }
 
 function selectGasLight(id) {
-  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: id };
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: id, noteId: null };
   openGasLightEditor(id);
   renderAll();
 }
