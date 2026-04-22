@@ -1,15 +1,85 @@
+
 // state
 const LEGACY_WH = { w: 400, h: 180, unit: 'ft' };
-const WH_CONFIGS = [
-  { key: 'tent3', name: 'Tent-3', w: 400, h: 180, lw: 200, lh: 85, unit: 'ft' },
-  { key: 'tent4', name: 'Tent-4', w: 800, h: 360, lw: 400, lh: 170, unit: 'ft' },
-];
-let WH = { ...WH_CONFIGS[0] };
-const LABEL_WH = { w: 200, h: 85 };
 const DEFAULT_PALLET = { w: 4, h: 4 };
 const API_BASE = '';
 const SAVE_DEBOUNCE_MS = 2000;
 const POLL_INTERVAL_MS = 3000;
+const WH_CONFIGS = [
+  { key: 'tent3', name: 'Tent-3', w: 400, h: 180, lw: 200, lh: 85, unit: 'ft' },
+  { key: 'tent4', name: 'Tent-4', w: 800, h: 260, lw: 800, lh: 260, unit: 'ft' },
+];
+let WH = { ...WH_CONFIGS[0] };
+
+/* Tent-4 structural columns config */
+const T4_COL_ROWS_Y = [50, 130, 210, 260];
+const T4_COL_SPACING_X = 26;
+const T4_COL_SIZE = 2;
+const T4_PALLET_SIZE = 4;
+const T4_DOOR = { wall: 'top', x1: 26, x2: 52 }; // top wall, between 2nd and 3rd column
+
+function getT4Columns() {
+  const cols = [];
+  for (const rowY of T4_COL_ROWS_Y) {
+    for (let x = 0; x <= 800; x += T4_COL_SPACING_X) {
+      cols.push({ x, y: rowY });
+    }
+  }
+  return cols;
+}
+
+/* Pallet capacity calculator for Tent-4 zones */
+function palletOverlapsColumn(px, py, pw, ph, columns) {
+  const half = T4_COL_SIZE / 2;
+  for (const col of columns) {
+    if (px < col.x + half && px + pw > col.x - half &&
+        py < col.y + half && py + ph > col.y - half) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getColumnsInRect(rx, ry, rw, rh) {
+  if (currentWH !== 1) return [];
+  const cols = getT4Columns();
+  const half = T4_COL_SIZE / 2;
+  const result = [];
+  for (const col of cols) {
+    if (col.x + half > rx && col.x - half < rx + rw &&
+        col.y + half > ry && col.y - half < ry + rh) {
+      result.push(col);
+    }
+  }
+  return result;
+}
+
+function calcMaxPallets(zoneSegs) {
+  if (currentWH !== 1) return { count: 0, positions: [], blocked: 0, columnsInZone: 0 };
+  const cols = getT4Columns();
+  const ps = T4_PALLET_SIZE;
+  let totalCount = 0, totalBlocked = 0, totalCols = 0;
+  const allPositions = [];
+  for (const seg of zoneSegs) {
+    const segCols = getColumnsInRect(seg.x, seg.y, seg.w, seg.h);
+    totalCols += segCols.length;
+    const gridW = Math.floor(seg.w / ps);
+    const gridH = Math.floor(seg.h / ps);
+    for (let iy = 0; iy < gridH; iy++) {
+      for (let ix = 0; ix < gridW; ix++) {
+        const px = seg.x + ix * ps;
+        const py = seg.y + iy * ps;
+        if (palletOverlapsColumn(px, py, ps, ps, segCols)) {
+          totalBlocked++;
+        } else {
+          allPositions.push({ x: px, y: py });
+          totalCount++;
+        }
+      }
+    }
+  }
+  return { count: totalCount, positions: allPositions, blocked: totalBlocked, columnsInZone: totalCols };
+}
 
 let categories = [
   { id:'staging', name:'Staging', color:'#ec4899',
@@ -36,23 +106,58 @@ let nextZId = 100;
 let nextPId = 1000;
 let nextCId = 50;
 
-let gasLights = [];
+let gasLights = []; // array of { id, name, x, y, status: 'on'|'off', notes: '' }
 let nextGLId = 1;
 function glid() { return 'gl' + (nextGLId++); }
 
-let notes = [];
-let nextNoteId = 1;
-let addingNote = false;
-function nid() { return 'n' + (nextNoteId++); }
+let hazards = []; // array of { id, name, x, y, color: 'red'|'yellow'|'green', notes: '' }
+let nextHZId = 1;
+function hzid() { return 'hz' + (nextHZId++); }
 
 function zid() { return 'z' + (nextZId++); }
 function pid() { return 'p' + (nextPId++); }
-
 function round1(v) { return Math.round(v * 10) / 10; }
+function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+
+function getSlotExtent(slot) {
+  let maxX = 0;
+  let maxY = 0;
+  if (!slot) return { maxX, maxY };
+  (slot.zones || []).forEach(z => {
+    (z.segs || []).forEach(s => {
+      maxX = Math.max(maxX, (s.x || 0) + (s.w || 0));
+      maxY = Math.max(maxY, (s.y || 0) + (s.h || 0));
+    });
+    (z.pallets || []).forEach(p => {
+      maxX = Math.max(maxX, (p.x || 0) + (p.w || DEFAULT_PALLET.w));
+      maxY = Math.max(maxY, (p.y || 0) + (p.h || DEFAULT_PALLET.h));
+    });
+  });
+  (slot.gasLights || []).forEach(gl => {
+    maxX = Math.max(maxX, gl.x || 0);
+    maxY = Math.max(maxY, gl.y || 0);
+  });
+  (slot.hazards || []).forEach(hz => {
+    maxX = Math.max(maxX, hz.x || 0);
+    maxY = Math.max(maxY, hz.y || 0);
+  });
+  return { maxX, maxY };
+}
+
+function inferWarehouseFromSlot(slot) {
+  if (!slot) return WH_CONFIGS[0];
+  if (slot.warehouse && slot.warehouse.w && slot.warehouse.h) return slot.warehouse;
+  const extent = getSlotExtent(slot);
+  if (extent.maxX > WH_CONFIGS[0].w + 20 || extent.maxY > WH_CONFIGS[0].h + 10) {
+    return WH_CONFIGS[1];
+  }
+  return WH_CONFIGS[0];
+}
 
 function scaleSlotToWarehouse(slot, fromWH, toWH) {
   if (!slot) return slot;
-  if (!fromWH || !toWH || !fromWH.w || !fromWH.h || (fromWH.w === toWH.w && fromWH.h === toWH.h)) {
+  if (!fromWH || !toWH || !fromWH.w || !fromWH.h) return deepClone(slot);
+  if (Math.abs(fromWH.w - toWH.w) < 0.1 && Math.abs(fromWH.h - toWH.h) < 0.1) {
     return deepClone(slot);
   }
   const sx = toWH.w / fromWH.w;
@@ -76,130 +181,27 @@ function scaleSlotToWarehouse(slot, fromWH, toWH) {
     gl.x = round1((gl.x || 0) * sx);
     gl.y = round1((gl.y || 0) * sy);
   });
-  (scaled.notes || []).forEach(n => {
-    n.x = round1((n.x || 0) * sx);
-    n.y = round1((n.y || 0) * sy);
+  (scaled.hazards || []).forEach(hz => {
+    hz.x = round1((hz.x || 0) * sx);
+    hz.y = round1((hz.y || 0) * sy);
   });
   return scaled;
 }
 
-function getSlotExtent(slot) {
-  let maxX = 0, maxY = 0;
-  if (!slot || !slot.zones) return { maxX, maxY };
-  (slot.zones || []).forEach(z => {
-    (z.segs || []).forEach(s => {
-      maxX = Math.max(maxX, s.x + s.w);
-      maxY = Math.max(maxY, s.y + s.h);
-    });
-    (z.pallets || []).forEach(p => {
-      maxX = Math.max(maxX, p.x + p.w);
-      maxY = Math.max(maxY, p.y + p.h);
-    });
-  });
-  return { maxX, maxY };
-}
-
-function normalizeSlotForCurrentWarehouse(slot, srcWarehouse) {
+function normalizeSlotToWarehouse(slot, targetWH, declaredWH = null) {
   if (!slot) return slot;
-  const source = (srcWarehouse && srcWarehouse.w && srcWarehouse.h) ? srcWarehouse : null;
-  if (source && (Math.abs(source.w - WH.w) > 0.1 || Math.abs(source.h - WH.h) > 0.1)) {
-    return scaleSlotToWarehouse(slot, source, WH);
-  }
-  const extent = getSlotExtent(slot);
-  if (extent.maxX > WH.w + 20 || extent.maxY > WH.h + 10) {
-    return scaleSlotToWarehouse(slot, LEGACY_WH, WH);
-  }
-  return JSON.parse(JSON.stringify(slot));
+  const source = declaredWH || inferWarehouseFromSlot(slot);
+  return scaleSlotToWarehouse(slot, source, targetWH);
 }
 
-let zones = [
-  { id:zid(), name:'Prestaging', cat:'staging', color:'#ec4899',
-    segs:[{x:5,y:5,w:35,h:170}], pallets:[], capacity:12, boxes:0 },
-  { id:zid(), name:'DH11', cat:'dh', color:'#22c997',
-    segs:[{x:45,y:5,w:80,h:80}], pallets:makePals(45,5,80,80,'L',9), capacity:12, boxes:0 },
-  { id:zid(), name:'DH9', cat:'dh', color:'#10b981',
-    segs:[{x:45,y:90,w:60,h:85},{x:105,y:120,w:30,h:55}], pallets:makePals(45,90,60,85,'L',8), capacity:12, boxes:0 },
-  { id:zid(), name:'AEC-1', cat:'aec', color:'#8b5cf6',
-    segs:[{x:130,y:5,w:50,h:50}], pallets:makePals(130,5,50,50,'A',4), capacity:8, boxes:0 },
-  { id:zid(), name:'AEC-2', cat:'aec', color:'#a78bfa',
-    segs:[{x:130,y:60,w:50,h:50}], pallets:makePals(130,60,50,50,'A',4), capacity:8, boxes:0 },
-  { id:zid(), name:'DH9 Copper', cat:'dh', color:'#f59e0b',
-    segs:[{x:130,y:115,w:50,h:60}], pallets:makePals(130,115,50,60,'C',3), capacity:6, boxes:0 },
-  { id:zid(), name:'R T1-T2', cat:'roce', color:'#3b82f6',
-    segs:[{x:185,y:5,w:50,h:42}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'R T2-T3', cat:'roce', color:'#60a5fa',
-    segs:[{x:185,y:52,w:50,h:42}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'S AS T-1', cat:'sis', color:'#f97316',
-    segs:[{x:185,y:99,w:50,h:38}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'S T1-T2', cat:'sis', color:'#fb923c',
-    segs:[{x:185,y:142,w:50,h:33}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'S T2-T3', cat:'sis', color:'#fdba74',
-    segs:[{x:240,y:5,w:50,h:42}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'NVS-NVM', cat:'nvs', color:'#eab308',
-    segs:[{x:240,y:52,w:50,h:38}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'NVS-NVB', cat:'nvs', color:'#facc15',
-    segs:[{x:240,y:95,w:50,h:38}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'NVS-KS', cat:'nvs', color:'#fde047',
-    segs:[{x:240,y:138,w:50,h:37}], pallets:[], capacity:6, boxes:0 },
-  { id:zid(), name:'DEV-EM', cat:'special', color:'#06b6d4',
-    segs:[{x:295,y:5,w:50,h:42}], pallets:[], capacity:4, boxes:0 },
-  { id:zid(), name:'GPU-MS', cat:'special', color:'#22d3ee',
-    segs:[{x:295,y:52,w:50,h:42}], pallets:[], capacity:4, boxes:0 },
-  { id:zid(), name:'SPARES', cat:'special', color:'#67e8f9',
-    segs:[{x:295,y:99,w:50,h:38}], pallets:[], capacity:8, boxes:0 },
-  { id:zid(), name:'IPMI CAT6', cat:'special', color:'#a5f3fc',
-    segs:[{x:295,y:142,w:50,h:33}], pallets:[], capacity:4, boxes:0 },
-  { id:zid(), name:'TDS QC Area', cat:'ops', color:'#f472b6',
-    segs:[{x:350,y:5,w:45,h:42}], pallets:[], capacity:4, boxes:0 },
-  { id:zid(), name:'TDS Labeling', cat:'ops', color:'#f9a8d4',
-    segs:[{x:350,y:52,w:45,h:38}], pallets:[], capacity:4, boxes:0 },
-  { id:zid(), name:'Jeda Labeling', cat:'ops', color:'#fbcfe8',
-    segs:[{x:350,y:95,w:45,h:38}], pallets:[], capacity:4, boxes:0 },
-  { id:zid(), name:'Leadership', cat:'ops', color:'#e879f9',
-    segs:[{x:350,y:138,w:45,h:37}], pallets:[], capacity:0, boxes:0 },
-  { id:zid(), name:'Network Rack', cat:'infra', color:'#6b7280',
-    segs:[{x:185,y:142,w:0,h:0}], pallets:[], capacity:2, boxes:0 },
-  { id:zid(), name:'Quad Outlet', cat:'infra', color:'#9ca3af',
-    segs:[{x:0,y:0,w:0,h:0}], pallets:[], capacity:0, boxes:0 },
-  { id:zid(), name:'Power Area', cat:'infra', color:'#ef4444',
-    segs:[{x:0,y:0,w:0,h:0}], pallets:[], capacity:0, boxes:0 },
-];
+function normalizeSlotToCurrentWarehouse(slot, declaredWH = null) {
+  return normalizeSlotToWarehouse(slot, WH, declaredWH);
+}
 
-zones[zones.length - 3].segs = [{x:350,y:5,w:0,h:0}]; // Will be placed by user
-zones[zones.length - 2].segs = [{x:350,y:5,w:0,h:0}];
-zones[zones.length - 1].segs = [{x:350,y:5,w:0,h:0}];
-
-zones.forEach((z, i) => {
-  z.segs.forEach(s => {
-    if (s.w === 0) {
-      s.x = 185 + Math.floor(i % 3) * 55;
-      s.y = 142;
-      s.w = 45;
-      s.h = 33;
-    }
-  });
-});
-
-const infraZones = zones.filter(z => z.cat === 'infra');
-infraZones.forEach((z, i) => {
-  z.segs[0] = { x: 5, y: 5, w: 30, h: 25 }; // Will overlap with prestaging, user repositions
-});
-if (infraZones.length >= 1) infraZones[0].segs[0] = {x:295, y:142, w:50, h:33};
-if (infraZones.length >= 2) infraZones[1].segs[0] = {x:130, y:142, w:50, h:33};
-if (infraZones.length >= 3) infraZones[2].segs[0] = {x:65, y:142, w:55, h:33};
-
-({ zones } = normalizeSlotToCurrentWarehouse({ zones }, LEGACY_WH));
+// Default zones empty — Tent-3 starts clean (saved data loads from IndexedDB)
+let zones = [];
 
 zones.forEach(z => { if (!z.tags) z.tags = []; if (z.parentId === undefined) z.parentId = null; if (!z.pallets) z.pallets = []; if (!z.segs) z.segs = []; });
-
-if (WH.w !== LEGACY_WH.w || WH.h !== LEGACY_WH.h) {
-  const scaledDefaults = normalizeSlotForCurrentWarehouse({ zones, categories, nextZId, nextPId, nextCId }, LEGACY_WH);
-  zones = scaledDefaults.zones || zones;
-  categories = scaledDefaults.categories || categories;
-  nextZId = scaledDefaults.nextZId || nextZId;
-  nextPId = scaledDefaults.nextPId || nextPId;
-  nextCId = scaledDefaults.nextCId || nextCId;
-}
 
 function makePals(zx, zy, zw, zh, prefix, count) {
   const pals = [];
@@ -223,145 +225,7 @@ function makePals(zx, zy, zw, zh, prefix, count) {
   return pals;
 }
 
-function round1(v) { return Math.round(v * 10) / 10; }
-
-function deepClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-
-function inferWarehouseFromSlot(slot) {
-  if (!slot || !Array.isArray(slot.zones) || slot.zones.length === 0) return WH;
-  let maxX = 0, maxY = 0;
-  slot.zones.forEach(z => {
-    (z.segs || []).forEach(s => {
-      maxX = Math.max(maxX, (s.x || 0) + (s.w || 0));
-      maxY = Math.max(maxY, (s.y || 0) + (s.h || 0));
-    });
-    (z.pallets || []).forEach(p => {
-      maxX = Math.max(maxX, (p.x || 0) + (p.w || 0));
-      maxY = Math.max(maxY, (p.y || 0) + (p.h || 0));
-    });
-  });
-  if (maxX > WH.w * 1.15 || maxY > WH.h * 1.15) return LEGACY_WH;
-  return WH;
-}
-
-function scaleSlotToWarehouse(slot, fromWH, toWH) {
-  if (!slot) return slot;
-  if (!fromWH || !toWH || !fromWH.w || !fromWH.h || (fromWH.w === toWH.w && fromWH.h === toWH.h)) {
-    return deepClone(slot);
-  }
-  const sx = toWH.w / fromWH.w;
-  const sy = toWH.h / fromWH.h;
-  const scaled = deepClone(slot);
-  (scaled.zones || []).forEach(z => {
-    (z.segs || []).forEach(s => {
-      s.x = round1((s.x || 0) * sx);
-      s.y = round1((s.y || 0) * sy);
-      s.w = round1((s.w || 0) * sx);
-      s.h = round1((s.h || 0) * sy);
-    });
-    (z.pallets || []).forEach(p => {
-      p.x = round1((p.x || 0) * sx);
-      p.y = round1((p.y || 0) * sy);
-      p.w = round1((p.w || DEFAULT_PALLET.w) * sx);
-      p.h = round1((p.h || DEFAULT_PALLET.h) * sy);
-    });
-  });
-  (scaled.notes || []).forEach(n => {
-    n.x = round1((n.x || 0) * sx);
-    n.y = round1((n.y || 0) * sy);
-  });
-  return scaled;
-}
-
-function normalizeSlotToCurrentWarehouse(slot, declaredWH = null) {
-  if (!slot) return slot;
-  const fromWH = declaredWH || inferWarehouseFromSlot(slot);
-  return scaleSlotToWarehouse(slot, fromWH, WH);
-}
-
-function normalizeServerLayout(layout) {
-  if (!layout || !Array.isArray(layout.warehouses)) return layout;
-  const migrated = migrateLegacyWarehouses(layout.warehouses);
-  return {
-    warehouse: WH_CONFIGS[currentWH] || WH,
-    warehouses: migrated.map((slot, idx) => {
-      if (!slot) return slot;
-      const declared = slot.warehouse && slot.warehouse.w && slot.warehouse.h ? slot.warehouse : (idx === 0 ? LEGACY_WH : WH_CONFIGS[idx]);
-      const normalized = normalizeSlotToCurrentWarehouse(slot, declared);
-      normalized.warehouse = { ...WH_CONFIGS[idx] };
-      if (!normalized.gasLights) normalized.gasLights = [];
-      if (!normalized.nextGLId) normalized.nextGLId = 1;
-      return normalized;
-    }),
-    currentWH: 0
-  };
-}
-
-function getSegmentInnerBounds(z, segIdx = 0, pad = 2) {
-  const s = (z.segs || [])[segIdx] || z.segs[0];
-  if (!s) return null;
-  const headerPad = segIdx === 0 ? QF_HEADER + 1 : 2;
-  return {
-    x: round1(s.x + pad),
-    y: round1(s.y + headerPad),
-    w: round1(Math.max(0, s.w - pad * 2)),
-    h: round1(Math.max(0, s.h - headerPad - pad)),
-    seg: s,
-    segIdx
-  };
-}
-
-function formatSeqLabel(prefix, num) {
-  const base = (prefix || 'P').trim() || 'P';
-  return base + num;
-}
-
-function rectsIntersect(ax, ay, aw, ah, bx, by, bw, bh, eps = 0.001) {
-  return ax < bx + bw - eps && ax + aw > bx + eps && ay < by + bh - eps && ay + ah > by + eps;
-}
-
-function getPalletsInSegment(z, segIdx = 0) {
-  const inner = getSegmentInnerBounds(z, segIdx, 0);
-  if (!inner) return [];
-  return (z.pallets || []).filter(p => rectsIntersect(
-    p.x || 0,
-    p.y || 0,
-    p.w || DEFAULT_PALLET.w,
-    p.h || DEFAULT_PALLET.h,
-    inner.x,
-    inner.y,
-    inner.w,
-    inner.h
-  ));
-}
-
-function getRowFillPlacement(z, segIdx, dir, pw, ph, gap) {
-  const inner = getSegmentInnerBounds(z, segIdx);
-  if (!inner) return null;
-  const segPallets = getPalletsInSegment(z, segIdx);
-  if (dir === 'h') {
-    const nextY = segPallets.length
-      ? Math.max(...segPallets.map(p => (p.y || 0) + (p.h || ph))) + gap
-      : inner.y;
-    const availableBand = inner.y + inner.h - nextY;
-    const maxCount = availableBand + 0.001 >= ph
-      ? Math.max(0, Math.floor((inner.w + gap) / (pw + gap)))
-      : 0;
-    return { inner, segPallets, x: inner.x, y: round1(nextY), maxCount };
-  }
-  const nextX = segPallets.length
-    ? Math.max(...segPallets.map(p => (p.x || 0) + (p.w || pw))) + gap
-    : inner.x;
-  const availableBand = inner.x + inner.w - nextX;
-  const maxCount = availableBand + 0.001 >= pw
-    ? Math.max(0, Math.floor((inner.h + gap) / (ph + gap)))
-    : 0;
-  return { inner, segPallets, x: round1(nextX), y: inner.y, maxCount };
-}
-
-let sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: null };
+let sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, hazardId: null };
 let multiSel = []; // {zid, pid}[]
 let snap = true;
 let heatMapOn = false;
@@ -372,8 +236,8 @@ const SNAP_GRID = 5;
    ================================================================= */
 let currentWH = Number(localStorage.getItem('whsims.currentWH') || '0');
 if (![0, 1].includes(currentWH)) currentWH = 0;
-const WH_THEMES = ['wh2', 'wh3']; // Tent-3 orange, Tent-4 green
-const WH_ACCENTS = ['#f59e0b', '#10b981'];
+const WH_THEMES = ['wh2', 'wh3']; // CSS class per warehouse (Tent-3=orange, Tent-4=green)
+const WH_ACCENTS = ['#f59e0b', '#10b981']; // tab dot colors
 
 function saveCurrentToSlot() {
   return {
@@ -382,8 +246,8 @@ function saveCurrentToSlot() {
     nextZId, nextPId, nextCId,
     gasLights: JSON.parse(JSON.stringify(gasLights || [])),
     nextGLId,
-    notes: JSON.parse(JSON.stringify(notes || [])),
-    nextNoteId,
+    hazards: JSON.parse(JSON.stringify(hazards || [])),
+    nextHZId,
     warehouse: { ...WH_CONFIGS[currentWH] }
   };
 }
@@ -395,28 +259,42 @@ function loadSlotToCurrent(slot) {
   nextZId = slot.nextZId || nextZId;
   nextPId = slot.nextPId || nextPId;
   nextCId = slot.nextCId || nextCId;
-  gasLights = slot.gasLights || [];
-  nextGLId = slot.nextGLId || nextGLId;
-  notes = slot.notes || [];
-  nextNoteId = slot.nextNoteId || nextNoteId;
+  gasLights = slot.gasLights || []; nextGLId = slot.nextGLId || nextGLId;
+  hazards = slot.hazards || []; nextHZId = slot.nextHZId || nextHZId;
 }
 
-let warehouseData = [null, null]; // filled in init
+let warehouseData = [null, null]; // filled in init (Tent-3, Tent-4)
 
 function migrateLegacyWarehouses(warehouses) {
   if (!Array.isArray(warehouses)) return [null, null];
   const slots = warehouses.slice();
   const hasMetadata = slots.some(slot => slot && slot.warehouse && slot.warehouse.key);
   if (hasMetadata) return slots.slice(0, 2);
-  // Legacy 2-slot layout was Tent-2 / Tent-3. New UI is Tent-3 / Tent-4.
-  if (slots.length === 2) {
-    return [slots[1] || null, null];
-  }
-  // Legacy 3-slot layout was Tent-2 / Tent-3 / Tent-4.
-  if (slots.length >= 3) {
-    return [slots[1] || null, slots[2] || null];
-  }
+  if (slots.length === 2) return [slots[1] || null, null];
+  if (slots.length >= 3) return [slots[1] || null, slots[2] || null];
   return [slots[0] || null, slots[1] || null];
+}
+
+function normalizeServerLayout(layout) {
+  if (!layout || !Array.isArray(layout.warehouses)) return layout;
+  const migrated = migrateLegacyWarehouses(layout.warehouses);
+  return {
+    warehouse: WH_CONFIGS[currentWH] || WH,
+    warehouses: migrated.map((slot, idx) => {
+      if (!slot) return slot;
+      const declared = slot.warehouse && slot.warehouse.w && slot.warehouse.h
+        ? slot.warehouse
+        : (idx === 0 ? LEGACY_WH : WH_CONFIGS[idx]);
+      const normalized = normalizeSlotToWarehouse(slot, WH_CONFIGS[idx], declared);
+      normalized.warehouse = { ...WH_CONFIGS[idx] };
+      if (!normalized.gasLights) normalized.gasLights = [];
+      if (!normalized.nextGLId) normalized.nextGLId = 1;
+      if (!normalized.hazards) normalized.hazards = [];
+      if (!normalized.nextHZId) normalized.nextHZId = 1;
+      return normalized;
+    }),
+    currentWH: 0
+  };
 }
 
 function applyWarehouseTheme(idx) {
@@ -440,19 +318,18 @@ function switchWarehouse(idx) {
   } else {
     zones = [];
     gasLights = [];
-    notes = [];
+    hazards = [];
     categories = JSON.parse(JSON.stringify((warehouseData[0] && warehouseData[0].categories) || categories));
-    nextZId = 500; nextPId = 5000; nextCId = 100; nextGLId = 1; nextNoteId = 1;
+    nextZId = 500; nextPId = 5000; nextCId = 100; nextGLId = 1; nextHZId = 1;
     warehouseData[idx] = saveCurrentToSlot();
   }
   applyWarehouseTheme(idx);
-  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: null };
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, hazardId: null };
   closeEditor();
   renderAll();
   setTimeout(zoomFit, 50);
   toast('Switched to ' + (WH_CONFIGS[idx]?.name || ('Tent-' + (idx + 3))), 'inf');
 }
-
 
 /* =================================================================
    DARK / LIGHT
@@ -475,7 +352,7 @@ const svg = document.getElementById('svg');
 const world = document.getElementById('world');
 const cArea = document.getElementById('canvasArea');
 
-let vb = { x: -10, y: -8, w: WH.w + 20, h: WH.h + 16 };
+let vb = { x: -20, y: -20, w: 440, h: 220 };
 let zoom = 1;
 let panning = false;
 let panStart = { x: 0, y: 0 };
@@ -496,9 +373,8 @@ function doSnap(v) { return snap ? Math.round(v / SNAP_GRID) * SNAP_GRID : Math.
 let interacting = false; // true when dragging zone/pallet/handle
 
 cArea.addEventListener('pointerdown', e => {
-  if (addingNote) return;
   if (interacting) return;
-  if (e.target.closest('.zr') || e.target.closest('.pr') || e.target.closest('.rh') || e.target.closest('.gl-obj') || e.target.closest('.note-obj')) return;
+  if (e.target.closest('.zr') || e.target.closest('.pr') || e.target.closest('.rh') || e.target.closest('.gl-obj')) return;
   if (e.target.closest('.sb-toggle') || e.target.closest('.ctb') || e.target.closest('.hm-legend') || e.target.closest('button')) return;
   panning = true;
   panStart = { x: e.clientX, y: e.clientY };
@@ -570,28 +446,13 @@ function zoomOut() {
   zoom /= 1.25; applyVB();
 }
 function zoomFit() {
-  const padX = 8;
-  const padY = 6;
-  vb = { x: -padX, y: -padY, w: WH.w + padX * 2, h: WH.h + padY * 2 };
+  const pad = 20;
+  vb = { x: -pad, y: -pad, w: WH.w + pad * 2, h: WH.h + pad * 2 };
   const r = svg.getBoundingClientRect();
   const asp = r.width / r.height;
   const vAsp = vb.w / vb.h;
-  if (asp > vAsp) {
-    const nw = vb.h * asp;
-    vb.x -= (nw - vb.w) / 2;
-    vb.w = nw;
-  } else {
-    const nh = vb.w / asp;
-    vb.y -= (nh - vb.h) / 2;
-    vb.h = nh;
-  }
-  const boost = 1.08;
-  const cx = vb.x + vb.w / 2;
-  const cy = vb.y + vb.h / 2;
-  vb.w /= boost;
-  vb.h /= boost;
-  vb.x = cx - vb.w / 2;
-  vb.y = cy - vb.h / 2;
+  if (asp > vAsp) { const nw = vb.h * asp; vb.x -= (nw - vb.w) / 2; vb.w = nw; }
+  else { const nh = vb.w / asp; vb.y -= (nh - vb.h) / 2; vb.h = nh; }
   zoom = r.width / vb.w;
   applyVB();
 }
@@ -605,30 +466,74 @@ function toggleSnap() {
 // render
 function renderSVG() {
   // Warehouse border
-  document.getElementById('whBorder').innerHTML = `
-    <rect x="0" y="0" width="${WH.w}" height="${WH.h}" fill="none"
-      stroke="var(--text-3)" stroke-width="1.5" stroke-dasharray="6 3" rx="3"/>
-    <!-- BACK = left side -->
+  let borderSVG = '';
+  const isT4 = currentWH === 1;
+
+  if (isT4) {
+    // Tent-4: solid walls with door gap on top wall
+    // Top wall with door gap
+    borderSVG += `<line x1="0" y1="0" x2="${T4_DOOR.x1}" y2="0" stroke="var(--text-3)" stroke-width="2"/>`;
+    borderSVG += `<line x1="${T4_DOOR.x2}" y1="0" x2="${WH.w}" y2="0" stroke="var(--text-3)" stroke-width="2"/>`;
+    // Bottom, left, right walls (full)
+    borderSVG += `<line x1="0" y1="${WH.h}" x2="${WH.w}" y2="${WH.h}" stroke="var(--text-3)" stroke-width="2"/>`;
+    borderSVG += `<line x1="0" y1="0" x2="0" y2="${WH.h}" stroke="var(--text-3)" stroke-width="2"/>`;
+    borderSVG += `<line x1="${WH.w}" y1="0" x2="${WH.w}" y2="${WH.h}" stroke="var(--text-3)" stroke-width="2"/>`;
+    // Door dashed green line on top wall
+    borderSVG += `<line x1="${T4_DOOR.x1}" y1="0" x2="${T4_DOOR.x2}" y2="0" stroke="var(--green)" stroke-width="2.5" stroke-dasharray="6 4" opacity="0.8"/>`;
+    // Door label
+    const doorMidX = (T4_DOOR.x1 + T4_DOOR.x2) / 2;
+    borderSVG += `<text x="${doorMidX}" y="-6" text-anchor="middle" font-family="IBM Plex Mono" font-size="5" font-weight="700" fill="var(--green)" opacity="0.8">ENTRANCE ↓</text>`;
+    // Door highlight
+    borderSVG += `<rect x="${T4_DOOR.x1}" y="-2" width="${T4_DOOR.x2 - T4_DOOR.x1}" height="20" fill="var(--green)" opacity="0.04"/>`;
+  } else {
+    // Tent-3: original dashed border
+    borderSVG += `<rect x="0" y="0" width="${WH.w}" height="${WH.h}" fill="none" stroke="var(--text-3)" stroke-width="1.5" stroke-dasharray="6 3" rx="3"/>`;
+  }
+
+  // Labels (both tents)
+  borderSVG += `
     <text x="-10" y="${WH.h/2}" text-anchor="middle" font-family="IBM Plex Mono"
       font-size="8" font-weight="700" fill="var(--text-3)" letter-spacing="3"
       transform="rotate(-90,-10,${WH.h/2})">◀ BACK</text>
-    <!-- FRONT = right side -->
     <text x="${WH.w+10}" y="${WH.h/2}" text-anchor="middle" font-family="IBM Plex Mono"
       font-size="8" font-weight="700" fill="var(--accent-h)" letter-spacing="3"
       transform="rotate(90,${WH.w+10},${WH.h/2})">FRONT ▶</text>
-    <!-- Entrance label behind FRONT (further from warehouse) -->
     <text x="${WH.w+20}" y="${WH.h/2}" text-anchor="middle" font-family="IBM Plex Mono"
       font-size="5" font-weight="700" fill="var(--green)" letter-spacing="2" opacity="0.7"
       transform="rotate(90,${WH.w+20},${WH.h/2})">ENTRANCE</text>
-    <!-- Dimension labels -->
     <text x="${WH.w/2}" y="-6" text-anchor="middle" font-family="IBM Plex Mono"
-      font-size="6" font-weight="600" fill="var(--text-3)">${WH.lw || WH.w}ft</text>
+      font-size="6" font-weight="600" fill="var(--text-3)">${WH.lw||WH.w}ft</text>
     <text x="${WH.w/2}" y="${WH.h+12}" text-anchor="middle" font-family="IBM Plex Mono"
-      font-size="6" font-weight="600" fill="var(--text-3)">${WH.lw || WH.w}ft</text>
+      font-size="6" font-weight="600" fill="var(--text-3)">${WH.lw||WH.w}ft</text>
     <text x="-20" y="${WH.h/2}" text-anchor="middle" font-family="IBM Plex Mono"
       font-size="5" font-weight="600" fill="var(--text-3)"
-      transform="rotate(-90,-20,${WH.h/2})">${WH.lh || WH.h}ft</text>
-  `;
+      transform="rotate(-90,-20,${WH.h/2})">${WH.lh||WH.h}ft</text>`;
+
+  // Tent-4: structural columns
+  if (isT4) {
+    const cols = getT4Columns();
+    const half = T4_COL_SIZE / 2;
+    cols.forEach(c => {
+      borderSVG += `<rect x="${c.x - half}" y="${c.y - half}" width="${T4_COL_SIZE}" height="${T4_COL_SIZE}" fill="var(--orange)" stroke="#c2410c" stroke-width="0.4" opacity="0.9"/>`;
+    });
+    // Dimension annotations: row distances
+    const positions = [0, ...T4_COL_ROWS_Y];
+    const labels = ['50ft', '80ft', '80ft', '50ft'];
+    const annX = WH.w + 30;
+    for (let i = 0; i < positions.length - 1; i++) {
+      const y1 = positions[i], y2 = positions[i + 1];
+      const midY = (y1 + y2) / 2;
+      borderSVG += `<line x1="${annX}" y1="${y1}" x2="${annX}" y2="${y2}" stroke="var(--text-3)" stroke-width="0.4" stroke-dasharray="2 2" opacity="0.4"/>`;
+      borderSVG += `<line x1="${annX-3}" y1="${y1}" x2="${annX+3}" y2="${y1}" stroke="var(--text-3)" stroke-width="0.4" opacity="0.4"/>`;
+      borderSVG += `<line x1="${annX-3}" y1="${y2}" x2="${annX+3}" y2="${y2}" stroke="var(--text-3)" stroke-width="0.4" opacity="0.4"/>`;
+      borderSVG += `<text x="${annX+8}" y="${midY}" font-family="IBM Plex Mono" font-size="4" fill="var(--text-3)" dominant-baseline="middle" opacity="0.5">${labels[i]}</text>`;
+    }
+    // Column spacing annotation
+    borderSVG += `<line x1="0" y1="${T4_COL_ROWS_Y[0] - 8}" x2="${T4_COL_SPACING_X}" y2="${T4_COL_ROWS_Y[0] - 8}" stroke="var(--text-3)" stroke-width="0.4" stroke-dasharray="2 2" opacity="0.4"/>`;
+    borderSVG += `<text x="${T4_COL_SPACING_X/2}" y="${T4_COL_ROWS_Y[0] - 10}" text-anchor="middle" font-family="IBM Plex Mono" font-size="3.5" fill="var(--text-3)" opacity="0.5">${T4_COL_SPACING_X}ft</text>`;
+  }
+
+  document.getElementById('whBorder').innerHTML = borderSVG;
 
   // Zones
   const zG = document.getElementById('zonesG');
@@ -801,6 +706,7 @@ function renderSVG() {
     });
   });
 
+  // Gas Lights
   const glG = document.getElementById('gasLightsG');
   if (glG) {
     glG.innerHTML = '';
@@ -820,6 +726,7 @@ function renderSVG() {
       circle.setAttribute('opacity', gl.status === 'on' ? '0.9' : '0.6');
       g.appendChild(circle);
 
+      // glow effect for ON lights
       if (gl.status === 'on') {
         const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         glow.setAttribute('cx', gl.x);
@@ -832,6 +739,7 @@ function renderSVG() {
         g.appendChild(glow);
       }
 
+      // label
       const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       label.setAttribute('x', gl.x);
       label.setAttribute('y', gl.y + r + 5);
@@ -843,12 +751,94 @@ function renderSVG() {
       label.textContent = gl.name || 'Light';
       g.appendChild(label);
 
-      g.addEventListener('pointerdown', e => startGasLightDrag(e, gl.id));
+      g.addEventListener('pointerdown', (e) => startGasLightDrag(e, gl.id));
       glG.appendChild(g);
     });
   }
 
-  renderNotes();
+  // Hazard markers
+  const hzG = document.getElementById('hazardsG');
+  if (hzG) {
+    hzG.innerHTML = '';
+    const HZ_COLORS = { red: '#ef4444', yellow: '#f59e0b', green: '#22c55e' };
+    const HZ_GLOWS = { red: '#fca5a5', yellow: '#fde68a', green: '#86efac' };
+    (hazards || []).forEach(hz => {
+      const r = 5;
+      const color = HZ_COLORS[hz.color] || HZ_COLORS.red;
+      const glow = HZ_GLOWS[hz.color] || HZ_GLOWS.red;
+      const isSel = sel.hazardId === hz.id;
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'hz-obj' + (isSel ? ' sel' : ''));
+      g.setAttribute('data-hzid', hz.id);
+
+      // triangle warning sign
+      const triH = r * 2;
+      const triW = r * 2;
+      const cx = hz.x, cy = hz.y;
+      const points = `${cx},${cy - triH * 0.6} ${cx - triW * 0.55},${cy + triH * 0.4} ${cx + triW * 0.55},${cy + triH * 0.4}`;
+      const tri = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      tri.setAttribute('points', points);
+      tri.setAttribute('fill', color);
+      tri.setAttribute('stroke', isSel ? '#fff' : glow);
+      tri.setAttribute('stroke-width', isSel ? '1.2' : '0.6');
+      tri.setAttribute('opacity', '0.9');
+      g.appendChild(tri);
+
+      // exclamation mark inside
+      const exc = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      exc.setAttribute('x', cx);
+      exc.setAttribute('y', cy + triH * 0.15);
+      exc.setAttribute('text-anchor', 'middle');
+      exc.setAttribute('font-family', 'Arial, sans-serif');
+      exc.setAttribute('font-size', r * 1.1);
+      exc.setAttribute('font-weight', '900');
+      exc.setAttribute('fill', hz.color === 'yellow' ? '#000' : '#fff');
+      exc.textContent = '!';
+      g.appendChild(exc);
+
+      // glow ring when selected
+      if (isSel) {
+        const glowCirc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        glowCirc.setAttribute('cx', cx);
+        glowCirc.setAttribute('cy', cy);
+        glowCirc.setAttribute('r', r + 3);
+        glowCirc.setAttribute('fill', 'none');
+        glowCirc.setAttribute('stroke', color);
+        glowCirc.setAttribute('stroke-width', '0.6');
+        glowCirc.setAttribute('opacity', '0.5');
+        glowCirc.setAttribute('stroke-dasharray', '2,1');
+        g.appendChild(glowCirc);
+      }
+
+      // label
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', cx);
+      label.setAttribute('y', cy + triH * 0.4 + 5);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('font-family', 'IBM Plex Mono');
+      label.setAttribute('font-size', '3.5');
+      label.setAttribute('font-weight', '600');
+      label.setAttribute('fill', color);
+      label.textContent = hz.name || 'Hazard';
+      g.appendChild(label);
+
+      // notes indicator
+      if (hz.notes && hz.notes.trim()) {
+        const noteIcon = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        noteIcon.setAttribute('x', cx + triW * 0.55 + 1);
+        noteIcon.setAttribute('y', cy - triH * 0.3);
+        noteIcon.setAttribute('font-family', 'Font Awesome 6 Free');
+        noteIcon.setAttribute('font-weight', '900');
+        noteIcon.setAttribute('font-size', '3');
+        noteIcon.setAttribute('fill', cssVar('--text-3'));
+        noteIcon.textContent = '\uf249'; // sticky-note icon
+        g.appendChild(noteIcon);
+      }
+
+      g.addEventListener('pointerdown', (e) => startHazardDrag(e, hz.id));
+      hzG.appendChild(g);
+    });
+  }
 
   // Resize handles
   renderHandles();
@@ -941,13 +931,25 @@ function startZoneDrag(e, zid, si) {
   const offsets = z.segs.map(s => ({ dx: pt.x - s.x, dy: pt.y - s.y }));
   const palOffsets = z.pallets.map(p => ({ dx: pt.x - p.x, dy: pt.y - p.y }));
 
+  // Collect child zones (zones whose parentId === this zone's id)
+  const childZones = zones.filter(cz => cz.parentId === zid);
+  const childData = childZones.map(cz => ({
+    zone: cz,
+    segOffsets: cz.segs.map(s => ({ dx: pt.x - s.x, dy: pt.y - s.y })),
+    palOffsets: cz.pallets.map(p => ({ dx: pt.x - p.x, dy: pt.y - p.y }))
+  }));
+
   const onMove = ev => {
     const mp = s2svg(ev.clientX, ev.clientY);
 
-      const oldSegs = z.segs.map(s => ({ x: s.x, y: s.y }));
+    const oldSegs = z.segs.map(s => ({ x: s.x, y: s.y }));
     const oldPals = z.pallets.map(p => ({ x: p.x, y: p.y }));
+    const oldChildren = childData.map(cd => ({
+      segs: cd.zone.segs.map(s => ({ x: s.x, y: s.y })),
+      pals: cd.zone.pallets.map(p => ({ x: p.x, y: p.y }))
+    }));
 
-      z.segs.forEach((s, i) => {
+    z.segs.forEach((s, i) => {
       s.x = doSnap(mp.x - offsets[i].dx);
       s.y = doSnap(mp.y - offsets[i].dy);
     });
@@ -956,9 +958,25 @@ function startZoneDrag(e, zid, si) {
       p.y = doSnap(mp.y - palOffsets[i].dy);
     });
 
-      if (checkZoneCollision(z)) {
+    // Move child zones along with parent
+    childData.forEach(cd => {
+      cd.zone.segs.forEach((s, i) => {
+        s.x = doSnap(mp.x - cd.segOffsets[i].dx);
+        s.y = doSnap(mp.y - cd.segOffsets[i].dy);
+      });
+      cd.zone.pallets.forEach((p, i) => {
+        p.x = doSnap(mp.x - cd.palOffsets[i].dx);
+        p.y = doSnap(mp.y - cd.palOffsets[i].dy);
+      });
+    });
+
+    if (checkZoneCollision(z)) {
       z.segs.forEach((s, i) => { s.x = oldSegs[i].x; s.y = oldSegs[i].y; });
       z.pallets.forEach((p, i) => { p.x = oldPals[i].x; p.y = oldPals[i].y; });
+      childData.forEach((cd, ci) => {
+        cd.zone.segs.forEach((s, i) => { s.x = oldChildren[ci].segs[i].x; s.y = oldChildren[ci].segs[i].y; });
+        cd.zone.pallets.forEach((p, i) => { p.x = oldChildren[ci].pals[i].x; p.y = oldChildren[ci].pals[i].y; });
+      });
     }
 
     renderSVG();
@@ -1086,6 +1104,38 @@ function startPalletResize(e, zid, palId, dir) {
 }
 
 /* =================================================================
+   INTERACTION: GAS LIGHT DRAG
+   ================================================================= */
+function startGasLightDrag(e, glId) {
+  e.stopPropagation();
+  selectGasLight(glId);
+  const gl = gasLights.find(g => g.id === glId);
+  if (!gl) return;
+  interacting = true;
+  const pt = s2svg(e.clientX, e.clientY);
+  const off = { dx: pt.x - gl.x, dy: pt.y - gl.y };
+
+  const onMove = ev => {
+    const mp = s2svg(ev.clientX, ev.clientY);
+    gl.x = Math.max(0, Math.min(WH.w, mp.x - off.dx));
+    gl.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
+    if (snap) { gl.x = Math.round(gl.x / 5) * 5; gl.y = Math.round(gl.y / 5) * 5; }
+    renderSVG();
+    showDimBadge(ev.clientX, ev.clientY, `${gl.name}: ${Math.round(gl.x)},${Math.round(gl.y)}`);
+  };
+  const onUp = () => {
+    interacting = false;
+    hideDimBadge();
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    renderAll();
+    openGasLightEditor(glId);
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
+/* =================================================================
    DIM BADGE
    ================================================================= */
 function showDimBadge(cx, cy, text) {
@@ -1101,27 +1151,8 @@ function hideDimBadge() { document.getElementById('dimBadge').classList.remove('
    CLICK EMPTY — DESELECT
    ================================================================= */
 svg.addEventListener('click', e => {
-  if (addingNote && !e.target.closest('.gl-obj') && !e.target.closest('.note-obj')) {
-    const pt = s2svg(e.clientX, e.clientY);
-    const text = prompt('Enter note text:');
-    addingNote = false;
-    if (!text || !text.trim()) return;
-    const note = {
-      id: nid(),
-      x: doSnap(pt.x),
-      y: doSnap(pt.y),
-      text: text.trim()
-    };
-    notes.push(note);
-    sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: note.id };
-    renderAll();
-    openNoteEditor(note.id);
-    toast('Note added', 'ok');
-    return;
-  }
-
-  if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh') && !e.target.closest('.gl-obj') && !e.target.closest('.note-obj')) {
-    sel.zoneId = null; sel.palletId = null; sel.segIdx = null; sel.gasLightId = null; sel.noteId = null;
+  if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh') && !e.target.closest('.gl-obj') && !e.target.closest('.hz-obj')) {
+    sel.zoneId = null; sel.palletId = null; sel.segIdx = null; sel.gasLightId = null; sel.hazardId = null;
     if (multiSel.length > 0) { multiSel = []; updateBatchBar(); }
     closeEditor();
     renderAll();
@@ -1179,6 +1210,7 @@ function renderSidebar() {
     }
   }
 
+  // Gas Lights section in sidebar
   if (gasLights && gasLights.length > 0) {
     let glHtml = '<div class="cat-head"><div class="cat-dot" style="background:#f0b429"></div>GAS LIGHTS</div>';
     gasLights.forEach(gl => {
@@ -1192,6 +1224,22 @@ function renderSidebar() {
     html += glHtml;
   }
 
+  // Hazards section in sidebar
+  if (hazards && hazards.length > 0) {
+    const HZ_SIDE_COLORS = { red: '#ef4444', yellow: '#f59e0b', green: '#22c55e' };
+    let hzHtml = '<div class="cat-head"><div class="cat-dot" style="background:#ef4444"></div>HAZARDS</div>';
+    hazards.forEach(hz => {
+      const isAct = sel.hazardId === hz.id;
+      const c = HZ_SIDE_COLORS[hz.color] || '#ef4444';
+      hzHtml += '<div class="gl-item' + (isAct ? ' act' : '') + '" onclick="selectHazard(\'' + hz.id + '\')">';
+      hzHtml += '<i class="fas fa-exclamation-triangle" style="color:' + c + ';font-size:12px;flex-shrink:0"></i>';
+      hzHtml += '<div class="gl-info"><div class="gl-name">' + esc(hz.name) + '</div>';
+      hzHtml += '<div class="gl-meta"><span class="gl-dot" style="background:' + c + '"></span> ' + (hz.color === 'red' ? 'Critical' : hz.color === 'yellow' ? 'Warning' : 'Info') + (hz.notes ? ' · 📝' : '') + '</div></div>';
+      hzHtml += '</div>';
+    });
+    html += hzHtml;
+  }
+
   body.innerHTML = html || '<div style="text-align:center;padding:30px;color:var(--text-3)"><i class="fas fa-search" style="font-size:24px;display:block;margin-bottom:8px"></i>Nothing found</div>';
 }
 
@@ -1201,10 +1249,13 @@ function updateStats() {
   const tB = zones.reduce((s, z) => s + z.boxes, 0);
   const pct = tC > 0 ? Math.round(tP / tC * 100) : 0;
 
+  const colChip = currentWH === 1 ? '<div class="chip"><i class="fas fa-columns"></i> <b>' + getT4Columns().length + '</b> columns</div>' : '';
   document.getElementById('topChips').innerHTML = `
     <div class="chip"><i class="fas fa-layer-group"></i> <b>${zones.length}</b> zones</div>
     <div class="chip"><i class="fas fa-pallet"></i> <b>${tP}</b> pallets</div>
     <div class="chip"><i class="fas fa-box"></i> <b>${tB}</b> boxes</div>
+    ${colChip}
+    ${hazards.length > 0 ? '<div class="chip"><i class="fas fa-exclamation-triangle"></i> <b>' + hazards.length + '</b> hazards</div>' : ''}
     <div class="chip"><i class="fas fa-chart-pie"></i> <b>${pct}%</b></div>`;
 
   document.getElementById('sbStats').innerHTML = `
@@ -1212,7 +1263,7 @@ function updateStats() {
       <div class="st-item"><div class="st-l">Pallets</div><div class="st-v">${tP}</div></div>
       <div class="st-item"><div class="st-l">Boxes</div><div class="st-v">${tB}</div></div>
       <div class="st-item"><div class="st-l">Capacity</div><div class="st-v">${tC}</div></div>
-      <div class="st-item"><div class="st-l">Zones</div><div class="st-v">${zones.length}</div></div>
+      <div class="st-item"><div class="st-l">Hazards</div><div class="st-v">${hazards.length}</div></div>
     </div>
     <div class="ov-bar"><div class="ov-head"><span>Occupancy</span><b>${pct}%</b></div>
       <div class="pbar"><div class="pfill" style="width:${pct}%"></div></div></div>`;
@@ -1222,8 +1273,6 @@ function updateStats() {
 function selectZone(id) {
   sel.zoneId = id;
   sel.palletId = null;
-  sel.gasLightId = null;
-  sel.noteId = null;
   renderAll();
   openZoneEditor(id);
 }
@@ -1284,6 +1333,19 @@ function openZoneEditor(id) {
     </div>
     <div class="fg"><label>Boxes</label>
       <input type="number" id="eBox" min="0" value="${z.boxes}" onchange="applyZoneField('${id}','boxes',+this.value)"></div>
+    ${currentWH === 1 ? (() => {
+      const capResult = calcMaxPallets(z.segs);
+      return '<div style="background:linear-gradient(135deg,var(--bg-3),var(--bg-2));border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px;text-align:center">' +
+        '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-3);margin-bottom:6px">MAX PALLETS (4×4 ft)</div>' +
+        '<div style="font-family:var(--mono);font-size:32px;font-weight:700;color:var(--orange);line-height:1">' + capResult.count + '</div>' +
+        '<div style="font-size:11px;color:var(--text-2);margin-top:4px">pallets fit</div>' +
+        '<div style="display:flex;justify-content:center;gap:14px;margin-top:8px;font-size:11px;font-family:var(--mono);color:var(--text-3)">' +
+          '<span>Columns: ' + capResult.columnsInZone + '</span>' +
+          '<span>Blocked: ' + capResult.blocked + '</span>' +
+        '</div>' +
+        '<button class="btn btn-g" style="margin-top:8px;width:100%;justify-content:center;font-size:11px" onclick="autoSetCapacity(\'' + id + '\',' + capResult.count + ')"><i class="fas fa-magic"></i> Set as Capacity</button>' +
+      '</div>';
+    })() : ''}
     <div class="fg"><label><i class="fas fa-sticky-note" style="color:var(--yellow)"></i> Notes</label>
       <textarea id="eNotes" rows="2" style="resize:vertical;min-height:40px;font-size:13px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1);font-family:var(--font);width:100%;outline:none"
         onchange="applyZoneField('${id}','notes',this.value)"
@@ -1321,25 +1383,83 @@ function openZoneEditor(id) {
           ${z.pallets.length > 0 ? '<button class="btn btn-d" style="padding:4px 8px;font-size:11px" onclick="clearAllPallets(\'' + id + '\')" title="Remove all"><i class="fas fa-trash"></i></button>' : ''}
         </div>
       </div>
-      <div class="zone-tool-grid">
-        <button class="btn btn-g zone-tool-btn zone-tool-btn--quick" onclick="showQuickFillForm('${id}')"><i class="fas fa-th"></i><span>Quick Fill</span></button>
-        <button class="btn zone-tool-btn zone-tool-btn--row" onclick="showRowFillForm('${id}')"><i class="fas fa-grip-lines"></i><span>Row Fill</span></button>
-        <button class="btn zone-tool-btn zone-tool-btn--pack" onclick="packZoneToSegment('${id}')"><i class="fas fa-compress-arrows-alt"></i><span>Pack to Segment</span></button>
-        ${z.pallets.length > 0 ? '<button class="btn zone-tool-btn zone-tool-btn--select" onclick="selectAllPalletsInZone(\'' + id + '\')"><i class="fas fa-check-double"></i><span>Select All</span></button>' : ''}
+      <div style="display:flex;gap:4px;margin-bottom:6px;flex-wrap:wrap">
+        <button class="btn btn-g" style="flex:1;justify-content:center;font-size:11px;padding:6px 8px" onclick="showQuickFillForm('${id}')"><i class="fas fa-th"></i> Quick Fill</button>
+        <button class="btn" style="flex:1;justify-content:center;font-size:11px;padding:6px 8px;color:#f59e0b" onclick="showBatchAddForm('${id}')"><i class="fas fa-list"></i> Batch Add</button>
+        <button class="btn" style="flex:1;justify-content:center;font-size:11px;padding:6px 8px;color:#a78bfa" onclick="showRowFillForm('${id}')"><i class="fas fa-equals"></i> Row Fill</button>
+        ${z.pallets.length > 0 ? '<button class="btn" style="flex:1;justify-content:center;font-size:11px;padding:6px 8px;color:var(--cyan)" onclick="selectAllPalletsInZone(\'' + id + '\')"><i class="fas fa-check-double"></i> Select All</button>' : ''}
       </div>
-      <div id="quickFillForm" class="tool-panel" style="display:none">
-        <div class="tool-title" style="color:var(--green)"><i class="fas fa-th"></i> Quick Fill · Auto Grid</div>
+
+      <div id="batchAddForm" style="display:none;padding:8px;background:var(--bg-3);border-radius:var(--radius-sm);margin-bottom:6px">
+        <div style="font-size:11px;font-weight:700;color:#f59e0b;margin-bottom:6px"><i class="fas fa-list"></i> Batch Add — Named Pallets</div>
+        <div class="fg" style="margin:0 0 6px 0"><label>Names (comma or newline separated)</label>
+          <textarea id="batchNames" rows="3" style="font-size:13px;width:100%;resize:vertical;font-family:var(--mono);padding:6px 8px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1)" placeholder="LU7, LU8, LU3, LU16&#10;or one per line" oninput="updateBatchPreview('${id}')"></textarea></div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0"><label>Pallet W</label>
+            <input type="number" id="batchPw" value="8" min="2" style="font-size:13px" oninput="updateBatchPreview('${id}')"></div>
+          <div class="fg" style="margin:0"><label>Pallet H</label>
+            <input type="number" id="batchPh" value="8" min="2" style="font-size:13px" oninput="updateBatchPreview('${id}')"></div>
+          <div class="fg" style="margin:0"><label>Gap</label>
+            <input type="number" id="batchGap" value="2" min="0" style="font-size:13px" oninput="updateBatchPreview('${id}')"></div>
+        </div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0;flex:1"><label>Mode</label>
+            <select id="batchMode" style="font-size:13px;padding:5px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1)" oninput="updateBatchPreview('${id}')">
+              <option value="append">Add to existing</option>
+              <option value="replace">Replace all</option>
+            </select></div>
+        </div>
+        <div class="qf-preview" id="batchPreview">—</div>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px" onclick="doBatchAdd('${id}')"><i class="fas fa-check"></i> Create Pallets</button>
+          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('batchAddForm').style.display='none'"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+
+      <div id="rowFillForm" style="display:none;padding:8px;background:var(--bg-3);border-radius:var(--radius-sm);margin-bottom:6px">
+        <div style="font-size:11px;font-weight:700;color:#a78bfa;margin-bottom:6px"><i class="fas fa-equals"></i> Row Fill — Rows of Named Pallets</div>
+        <div id="rowFillRows"></div>
+        <button class="btn" style="width:100%;justify-content:center;font-size:11px;padding:5px 8px;margin-bottom:6px" onclick="addRowFillRow('${id}')"><i class="fas fa-plus"></i> Add Row</button>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0"><label>Pallet W</label>
+            <input type="number" id="rfPw" value="8" min="2" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+          <div class="fg" style="margin:0"><label>Pallet H</label>
+            <input type="number" id="rfPh" value="8" min="2" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+          <div class="fg" style="margin:0"><label>Gap</label>
+            <input type="number" id="rfGap" value="2" min="0" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
+        </div>
+        <div class="fr" style="margin-bottom:6px">
+          <div class="fg" style="margin:0;flex:1"><label>Direction</label>
+            <select id="rfDir" style="font-size:13px;padding:5px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1)">
+              <option value="h">Horizontal rows →</option>
+              <option value="v">Vertical columns ↓</option>
+            </select></div>
+          <div class="fg" style="margin:0;flex:1"><label>Mode</label>
+            <select id="rfMode" style="font-size:13px;padding:5px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1)">
+              <option value="append">Add to existing</option>
+              <option value="replace">Replace all</option>
+            </select></div>
+        </div>
+        <div class="qf-preview" id="rfPreview">—</div>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px" onclick="doRowFill('${id}')"><i class="fas fa-check"></i> Create Rows</button>
+          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('rowFillForm').style.display='none'"><i class="fas fa-times"></i></button>
+        </div>
+      </div>
+
+      <div id="quickFillForm" style="display:none;padding:8px;background:var(--bg-3);border-radius:var(--radius-sm);margin-bottom:6px">
+        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px"><i class="fas fa-th"></i> Quick Fill — Auto Grid</div>
         <div class="fr" style="margin-bottom:6px">
           <div class="fg" style="margin:0"><label>Pallet W (ft)</label>
-            <input type="number" id="qfPw" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
+            <input type="number" id="qfPw" value="8" min="2" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
           <div class="fg" style="margin:0"><label>Pallet H (ft)</label>
-            <input type="number" id="qfPh" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
+            <input type="number" id="qfPh" value="8" min="2" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
         </div>
         <div class="fr" style="margin-bottom:6px">
           <div class="fg" style="margin:0"><label>Gap (ft)</label>
-            <input type="number" id="qfGap" value="1" min="0" step="0.5" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
+            <input type="number" id="qfGap" value="2" min="0" style="font-size:13px" oninput="updateQfPreview('${id}')"></div>
           <div class="fg" style="margin:0;flex:2"><label>Prefix</label>
-            <input type="text" id="qfPrefix" value="P-" style="font-size:13px"></div>
+            <input type="text" id="qfPrefix" value="P" style="font-size:13px"></div>
           <div class="fg" style="margin:0;flex:1"><label>Start #</label>
             <input type="number" id="qfStart" value="1" min="0" style="font-size:13px"></div>
         </div>
@@ -1347,38 +1467,6 @@ function openZoneEditor(id) {
         <div style="display:flex;gap:4px">
           <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px" onclick="doQuickFill('${id}')"><i class="fas fa-check"></i> Fill Zone</button>
           <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('quickFillForm').style.display='none'"><i class="fas fa-times"></i></button>
-        </div>
-      </div>
-      <div id="rowFillForm" class="tool-panel" style="display:none">
-        <div class="tool-title" style="color:var(--accent-h)"><i class="fas fa-grip-lines"></i> Row Fill · Clean Lines</div>
-        <div class="fr" style="margin-bottom:6px">
-          <div class="fg" style="margin:0"><label>Direction</label>
-            <select id="rfDir" onchange="updateRowFillPreview('${id}')"><option value="h">Horizontal</option><option value="v">Vertical</option></select></div>
-          <div class="fg" style="margin:0"><label>Segment</label>
-            <select id="rfSeg" onchange="updateRowFillPreview('${id}')">${z.segs.map((s, i) => '<option value="' + i + '"' + ((sel.segIdx ?? 0) === i ? ' selected' : '') + '>Segment ' + (i + 1) + '</option>').join('')}</select></div>
-        </div>
-        <div class="fr" style="margin-bottom:6px">
-          <div class="fg" style="margin:0"><label>Count</label>
-            <input type="number" id="rfCount" value="6" min="1" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
-          <div class="fg" style="margin:0"><label>Gap (ft)</label>
-            <input type="number" id="rfGap" value="1" min="0" step="0.5" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
-        </div>
-        <div class="fr" style="margin-bottom:6px">
-          <div class="fg" style="margin:0"><label>Pallet W (ft)</label>
-            <input type="number" id="rfPw" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
-          <div class="fg" style="margin:0"><label>Pallet H (ft)</label>
-            <input type="number" id="rfPh" value="4" min="1" step="0.5" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
-        </div>
-        <div class="fr" style="margin-bottom:6px">
-          <div class="fg" style="margin:0;flex:2"><label>Prefix</label>
-            <input type="text" id="rfPrefix" value="ROW-" style="font-size:13px"></div>
-          <div class="fg" style="margin:0;flex:1"><label>Start #</label>
-            <input type="number" id="rfStart" value="1" min="0" style="font-size:13px" oninput="updateRowFillPreview('${id}')"></div>
-        </div>
-        <div class="qf-preview" id="rfPreview">—</div>
-        <div style="display:flex;gap:4px">
-          <button class="btn btn-p" style="flex:1;justify-content:center;font-size:11px" onclick="doRowFill('${id}')"><i class="fas fa-plus"></i> Add Row</button>
-          <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('rowFillForm').style.display='none'"><i class="fas fa-times"></i></button>
         </div>
       </div>
       ${palsHtml}
@@ -1444,6 +1532,15 @@ function applyZoneField(zid, field, val) {
   z[field] = val;
   renderAll();
   if (field === 'name') document.getElementById('edTitle').textContent = val;
+}
+
+function autoSetCapacity(zid, count) {
+  const z = zones.find(zz => zz.id === zid);
+  if (!z) return;
+  z.capacity = count;
+  renderAll();
+  openZoneEditor(zid);
+  toast('Capacity set to ' + count, 'ok');
 }
 
 function buildTagPickerHTML(zid, existingTags) {
@@ -1595,7 +1692,7 @@ function addPallet(zid) {
   if (!z) return;
   const s = z.segs[0];
   const pId = pid();
-  const pw = DEFAULT_PALLET.w, ph = DEFAULT_PALLET.h;
+  const pw = 8, ph = 8;
   const pad = 3;
   const headerH = 14;
   const gap = 2;
@@ -1603,12 +1700,14 @@ function addPallet(zid) {
   const availW = s.w - pad * 2;
   const cols = Math.max(1, Math.floor((availW + gap) / (pw + gap)));
 
+  const segCols = (currentWH === 1) ? getColumnsInRect(s.x, s.y, s.w, s.h) : [];
   let placed = false;
   for (let row = 0; row < 100 && !placed; row++) {
     for (let col = 0; col < cols && !placed; col++) {
       const px = s.x + pad + col * (pw + gap);
       const py = s.y + headerH + row * (ph + gap);
           if (py + ph > s.y + s.h) break;
+          if (currentWH === 1 && palletOverlapsColumn(px, py, pw, ph, segCols)) continue;
           const overlaps = z.pallets.some(p =>
         px < p.x + p.w && px + pw > p.x &&
         py < p.y + p.h && py + ph > p.y
@@ -1656,19 +1755,10 @@ function removePal(zid, palId) {
 // quick fill
 const QF_HEADER = 14;
 
-function closeZoneToolPanels() {
-  const quick = document.getElementById('quickFillForm');
-  const row = document.getElementById('rowFillForm');
-  if (quick) quick.style.display = 'none';
-  if (row) row.style.display = 'none';
-}
-
 function showQuickFillForm(zid) {
   const form = document.getElementById('quickFillForm');
   if (!form) return;
-  const shouldOpen = form.style.display === 'none';
-  closeZoneToolPanels();
-  form.style.display = shouldOpen ? 'block' : 'none';
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
   if (form.style.display === 'block') {
     updateQfPreview(zid);
     setTimeout(() => { const inp = document.getElementById('qfPw'); if (inp) inp.focus(); }, 50);
@@ -1679,8 +1769,8 @@ function updateQfPreview(zid) {
   const z = zones.find(zz => zz.id === zid);
   if (!z) return;
   const s = z.segs[0];
-  const pw = parseFloat(document.getElementById('qfPw').value) || DEFAULT_PALLET.w;
-  const ph = parseFloat(document.getElementById('qfPh').value) || DEFAULT_PALLET.h;
+  const pw = parseFloat(document.getElementById('qfPw').value) || 8;
+  const ph = parseFloat(document.getElementById('qfPh').value) || 8;
   const gap = parseFloat(document.getElementById('qfGap').value) || 2;
   const pad = 2;
   const availW = s.w - pad * 2;
@@ -1707,8 +1797,8 @@ function doQuickFill(zid) {
   if (!z) return;
   const s = z.segs[0];
 
-  const pw = parseFloat(document.getElementById('qfPw').value) || DEFAULT_PALLET.w;
-  const ph = parseFloat(document.getElementById('qfPh').value) || DEFAULT_PALLET.h;
+  const pw = parseFloat(document.getElementById('qfPw').value) || 8;
+  const ph = parseFloat(document.getElementById('qfPh').value) || 8;
   const gap = parseFloat(document.getElementById('qfGap').value) || 2;
   const prefix = (document.getElementById('qfPrefix').value || '').trim() || 'P';
   const startNum = parseInt(document.getElementById('qfStart').value) || 1;
@@ -1728,13 +1818,15 @@ function doQuickFill(zid) {
   const doFill = () => {
     z.pallets = [];
     let count = 0;
+    const segCols = (currentWH === 1) ? getColumnsInRect(s.x, s.y, s.w, s.h) : [];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
+        const px = startX + c * (pw + gap);
+        const py = startY + r * (ph + gap);
+        if (currentWH === 1 && palletOverlapsColumn(px, py, pw, ph, segCols)) continue;
         z.pallets.push({
           id: pid(), label: prefix + (startNum + count),
-          x: startX + c * (pw + gap),
-          y: startY + r * (ph + gap),
-          w: pw, h: ph
+          x: px, y: py, w: pw, h: ph
         });
         count++;
       }
@@ -1756,155 +1848,251 @@ function doQuickFill(zid) {
   }
 }
 
+// ===== BATCH ADD =====
+function showBatchAddForm(zid) {
+  // hide other forms
+  const qf = document.getElementById('quickFillForm'); if (qf) qf.style.display = 'none';
+  const rf = document.getElementById('rowFillForm'); if (rf) rf.style.display = 'none';
+  const form = document.getElementById('batchAddForm');
+  if (!form) return;
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+  if (form.style.display === 'block') {
+    updateBatchPreview(zid);
+    setTimeout(() => { const t = document.getElementById('batchNames'); if (t) t.focus(); }, 50);
+  }
+}
+
+function parseBatchNames(raw) {
+  return raw.split(/[,\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+}
+
+function updateBatchPreview(zid) {
+  const z = zones.find(zz => zz.id === zid); if (!z) return;
+  const names = parseBatchNames((document.getElementById('batchNames')?.value) || '');
+  const pw = parseFloat(document.getElementById('batchPw')?.value) || 8;
+  const ph = parseFloat(document.getElementById('batchPh')?.value) || 8;
+  const gap = parseFloat(document.getElementById('batchGap')?.value) || 2;
+  const s = z.segs[0];
+  const pad = 2;
+  const availW = s.w - pad * 2;
+  const cols = Math.max(1, Math.floor((availW + gap) / (pw + gap)));
+  const rows = Math.ceil(names.length / cols);
+  const el = document.getElementById('batchPreview');
+  if (el) {
+    if (names.length === 0) {
+      el.textContent = 'Type pallet names above';
+      el.style.color = 'var(--text-3)';
+    } else {
+      el.textContent = names.length + ' pallets → ' + cols + '×' + rows + ' grid  (' + names.slice(0, 3).join(', ') + (names.length > 3 ? '...' : '') + ')';
+      el.style.color = '#f59e0b';
+    }
+  }
+}
+
+function doBatchAdd(zid) {
+  const z = zones.find(zz => zz.id === zid); if (!z) return;
+  const s = z.segs[0];
+  const names = parseBatchNames((document.getElementById('batchNames')?.value) || '');
+  if (names.length === 0) { toast('Enter pallet names first', 'err'); return; }
+
+  const pw = parseFloat(document.getElementById('batchPw')?.value) || 8;
+  const ph = parseFloat(document.getElementById('batchPh')?.value) || 8;
+  const gap = parseFloat(document.getElementById('batchGap')?.value) || 2;
+  const mode = document.getElementById('batchMode')?.value || 'append';
+  const pad = 2;
+
+  const startX = s.x + pad;
+  const startY = s.y + QF_HEADER + 1;
+  const availW = s.w - pad * 2;
+  const cols = Math.max(1, Math.floor((availW + gap) / (pw + gap)));
+
+  const doIt = () => {
+    if (mode === 'replace') z.pallets = [];
+    // Find offset Y if appending
+    let offsetY = startY;
+    if (mode === 'append' && z.pallets.length > 0) {
+      const maxY = Math.max(...z.pallets.map(p => p.y + p.h));
+      offsetY = maxY + gap;
+    }
+    const segCols = (currentWH === 1) ? getColumnsInRect(s.x, s.y, s.w, s.h) : [];
+    names.forEach((name, i) => {
+      const c = i % cols;
+      const r = Math.floor(i / cols);
+      const px = startX + c * (pw + gap);
+      const py = offsetY + r * (ph + gap);
+      if (currentWH === 1 && palletOverlapsColumn(px, py, pw, ph, segCols)) return;
+      z.pallets.push({
+        id: pid(),
+        label: name,
+        x: px, y: py,
+        w: pw, h: ph
+      });
+    });
+    sel.palletId = null;
+    renderAll();
+    openZoneEditor(zid);
+    toast(names.length + ' pallets created: ' + names[0] + '...' + names[names.length - 1], 'ok');
+    const form = document.getElementById('batchAddForm'); if (form) form.style.display = 'none';
+  };
+
+  if (mode === 'replace' && z.pallets.length > 0) {
+    showModal('Replace ' + z.pallets.length + ' existing pallets?',
+      'Batch Add will remove current pallets and create ' + names.length + ' new ones.',
+      doIt);
+  } else {
+    doIt();
+  }
+}
+
+// ===== ROW FILL =====
+let rowFillData = []; // [{names: 'LU4, LU7, LU9'}]
 
 function showRowFillForm(zid) {
+  // hide other forms
+  const qf = document.getElementById('quickFillForm'); if (qf) qf.style.display = 'none';
+  const bf = document.getElementById('batchAddForm'); if (bf) bf.style.display = 'none';
   const form = document.getElementById('rowFillForm');
   if (!form) return;
-  const shouldOpen = form.style.display === 'none';
-  closeZoneToolPanels();
-  form.style.display = shouldOpen ? 'block' : 'none';
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
   if (form.style.display === 'block') {
+    rowFillData = [{ names: '' }];
+    renderRowFillRows(zid);
     updateRowFillPreview(zid);
-    setTimeout(() => { const inp = document.getElementById('rfPrefix'); if (inp) inp.focus(); }, 50);
+  }
+}
+
+function renderRowFillRows(zid) {
+  const container = document.getElementById('rowFillRows');
+  if (!container) return;
+  container.innerHTML = rowFillData.map((row, i) => `
+    <div style="display:flex;gap:4px;align-items:center;margin-bottom:5px">
+      <span style="font-size:10px;color:var(--text-3);font-family:var(--mono);width:18px;text-align:center;flex-shrink:0">R${i + 1}</span>
+      <input type="text" value="${row.names}" placeholder="LU4, LU7, LU9..."
+        style="flex:1;font-size:13px;font-family:var(--mono);padding:5px 8px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1)"
+        oninput="rowFillData[${i}].names=this.value;updateRowFillPreview('${zid}')">
+      ${rowFillData.length > 1 ? '<button class="btn btn-d" style="padding:3px 6px;font-size:10px" onclick="rowFillData.splice(' + i + ',1);renderRowFillRows(\'' + zid + '\');updateRowFillPreview(\'' + zid + '\')"><i class="fas fa-times"></i></button>' : ''}
+    </div>
+  `).join('');
+}
+
+function addRowFillRow(zid) {
+  rowFillData.push({ names: '' });
+  renderRowFillRows(zid);
+  updateRowFillPreview(zid);
+  // focus the last input
+  const container = document.getElementById('rowFillRows');
+  if (container) {
+    const inputs = container.querySelectorAll('input[type="text"]');
+    if (inputs.length > 0) inputs[inputs.length - 1].focus();
   }
 }
 
 function updateRowFillPreview(zid) {
-  const z = zones.find(zz => zz.id === zid);
-  if (!z) return;
-  const segIdx = parseInt(document.getElementById('rfSeg').value || (sel.segIdx ?? 0), 10) || 0;
-  const dir = document.getElementById('rfDir').value || 'h';
-  const count = Math.max(1, parseInt(document.getElementById('rfCount').value || '1', 10));
-  const gap = parseFloat(document.getElementById('rfGap').value) || 0;
-  const pw = parseFloat(document.getElementById('rfPw').value) || DEFAULT_PALLET.w;
-  const ph = parseFloat(document.getElementById('rfPh').value) || DEFAULT_PALLET.h;
-  const prefix = (document.getElementById('rfPrefix').value || 'ROW-').trim() || 'ROW-';
-  const startNum = parseInt(document.getElementById('rfStart').value || '1', 10) || 1;
-  const placement = getRowFillPlacement(z, segIdx, dir, pw, ph, gap);
+  let total = 0;
+  let rowCount = 0;
+  rowFillData.forEach(row => {
+    const names = parseBatchNames(row.names);
+    if (names.length > 0) { total += names.length; rowCount++; }
+  });
   const el = document.getElementById('rfPreview');
-  if (!el || !placement) return;
-
-  const actual = Math.min(count, placement.maxCount);
-  const labels = actual > 0
-    ? formatSeqLabel(prefix, startNum) + ' → ' + formatSeqLabel(prefix, startNum + actual - 1)
-    : formatSeqLabel(prefix, startNum);
-  let msg = (dir === 'h' ? 'Horizontal' : 'Vertical') + ' row, segment ' + (segIdx + 1) + ' · ' + labels;
-
-  if (placement.maxCount <= 0) {
-    msg += ' · no free space for another ' + (dir === 'h' ? 'row' : 'column');
-    el.style.color = 'var(--red)';
-  } else if (actual < count) {
-    msg += ' · requested ' + count + ', fits ' + actual;
-    el.style.color = 'var(--yellow)';
-  } else {
-    msg += ' · fits ' + actual;
-    el.style.color = 'var(--accent-h)';
+  if (el) {
+    if (total === 0) {
+      el.textContent = 'Type pallet names in rows above';
+      el.style.color = 'var(--text-3)';
+    } else {
+      el.textContent = total + ' pallets in ' + rowCount + ' row' + (rowCount !== 1 ? 's' : '');
+      el.style.color = '#a78bfa';
+    }
   }
-
-  el.textContent = msg;
 }
 
 function doRowFill(zid) {
-  const z = zones.find(zz => zz.id === zid);
-  if (!z) return;
-  const segIdx = parseInt(document.getElementById('rfSeg').value || (sel.segIdx ?? 0), 10) || 0;
-  const dir = document.getElementById('rfDir').value || 'h';
-  const requested = Math.max(1, parseInt(document.getElementById('rfCount').value || '1', 10));
-  const gap = parseFloat(document.getElementById('rfGap').value) || 0;
-  const pw = parseFloat(document.getElementById('rfPw').value) || DEFAULT_PALLET.w;
-  const ph = parseFloat(document.getElementById('rfPh').value) || DEFAULT_PALLET.h;
-  const prefix = (document.getElementById('rfPrefix').value || 'ROW-').trim() || 'ROW-';
-  const startNum = parseInt(document.getElementById('rfStart').value || '1', 10) || 1;
-  const placement = getRowFillPlacement(z, segIdx, dir, pw, ph, gap);
+  const z = zones.find(zz => zz.id === zid); if (!z) return;
+  const s = z.segs[0];
 
-  if (!placement || placement.maxCount <= 0) {
-    toast('No free space for another ' + (dir === 'h' ? 'row' : 'column') + ' in this segment', 'err');
-    return;
-  }
+  const pw = parseFloat(document.getElementById('rfPw')?.value) || 8;
+  const ph = parseFloat(document.getElementById('rfPh')?.value) || 8;
+  const gap = parseFloat(document.getElementById('rfGap')?.value) || 2;
+  const dir = document.getElementById('rfDir')?.value || 'h';
+  const mode = document.getElementById('rfMode')?.value || 'append';
+  const pad = 2;
 
-  const actual = Math.min(requested, placement.maxCount);
-  const newPallets = [];
-  for (let i = 0; i < actual; i++) {
-    const px = dir === 'h' ? placement.x + i * (pw + gap) : placement.x;
-    const py = dir === 'h' ? placement.y : placement.y + i * (ph + gap);
-    newPallets.push({
-      id: pid(),
-      label: formatSeqLabel(prefix, startNum + i),
-      x: round1(px),
-      y: round1(py),
-      w: pw,
-      h: ph
-    });
-  }
+  // Collect all rows
+  const rows = rowFillData.map(row => parseBatchNames(row.names)).filter(r => r.length > 0);
+  const totalPallets = rows.reduce((sum, r) => sum + r.length, 0);
+  if (totalPallets === 0) { toast('Enter pallet names first', 'err'); return; }
 
-  z.pallets.push(...newPallets);
-  renderAll();
-  openZoneEditor(zid);
-  if (actual < requested) {
-    toast('Placed ' + actual + ' of ' + requested + ' requested pallets in segment ' + (segIdx + 1), 'inf');
+  const doIt = () => {
+    if (mode === 'replace') z.pallets = [];
+
+    const startX = s.x + pad;
+    const startY = s.y + QF_HEADER + 1;
+
+    // Find offset if appending
+    let offsetX = startX;
+    let offsetY = startY;
+    if (mode === 'append' && z.pallets.length > 0) {
+      if (dir === 'h') {
+        const maxY = Math.max(...z.pallets.map(p => p.y + p.h));
+        offsetY = maxY + gap;
+      } else {
+        const maxX = Math.max(...z.pallets.map(p => p.x + p.w));
+        offsetX = maxX + gap;
+      }
+    }
+
+    const segCols = (currentWH === 1) ? getColumnsInRect(s.x, s.y, s.w, s.h) : [];
+    if (dir === 'h') {
+      // Horizontal: each row is left to right, rows stack top to bottom
+      rows.forEach((names, ri) => {
+        names.forEach((name, ci) => {
+          const px = startX + ci * (pw + gap);
+          const py = offsetY + ri * (ph + gap);
+          if (currentWH === 1 && palletOverlapsColumn(px, py, pw, ph, segCols)) return;
+          z.pallets.push({
+            id: pid(), label: name,
+            x: px, y: py, w: pw, h: ph
+          });
+        });
+      });
+    } else {
+      // Vertical: each "row" is top to bottom, columns stack left to right
+      rows.forEach((names, ci) => {
+        names.forEach((name, ri) => {
+          const px = offsetX + ci * (pw + gap);
+          const py = startY + ri * (ph + gap);
+          if (currentWH === 1 && palletOverlapsColumn(px, py, pw, ph, segCols)) return;
+          z.pallets.push({
+            id: pid(), label: name,
+            x: px, y: py, w: pw, h: ph
+          });
+        });
+      });
+    }
+
+    sel.palletId = null;
+    renderAll();
+    openZoneEditor(zid);
+    toast(totalPallets + ' pallets in ' + rows.length + ' rows created', 'ok');
+    const form = document.getElementById('rowFillForm'); if (form) form.style.display = 'none';
+  };
+
+  if (mode === 'replace' && z.pallets.length > 0) {
+    showModal('Replace ' + z.pallets.length + ' existing pallets?',
+      'Row Fill will remove current pallets and create ' + totalPallets + ' new ones in ' + rows.length + ' rows.',
+      doIt);
   } else {
-    toast(actual + ' row pallets added in segment ' + (segIdx + 1), 'ok');
+    doIt();
   }
 }
 
-function packZoneToSegment(zid) {
-  const z = zones.find(zz => zz.id === zid);
-  if (!z || !z.pallets || z.pallets.length === 0) { toast('No pallets to pack', 'err'); return; }
-  const segIdx = sel.segIdx != null ? sel.segIdx : 0;
-  const inner = getSegmentInnerBounds(z, segIdx);
-  if (!inner) { toast('No segment selected', 'err'); return; }
-
-  const targetPallets = getPalletsInSegment(z, segIdx);
-  if (targetPallets.length === 0) {
-    toast('No pallets found in selected segment', 'err');
-    return;
-  }
-
-  const ordered = [...targetPallets].sort((a, b) => {
-    const la = String(a.label || '');
-    const lb = String(b.label || '');
-    return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
-  });
-
-  let cx = inner.x;
-  let cy = inner.y;
-  let rowH = 0;
-  const gap = 0.75;
-  const packed = [];
-  const leftover = [];
-
-  for (const p of ordered) {
-    const pw = p.w || DEFAULT_PALLET.w;
-    const ph = p.h || DEFAULT_PALLET.h;
-    if (cx + pw > inner.x + inner.w + 0.001) {
-      cx = inner.x;
-      cy += rowH + gap;
-      rowH = 0;
-    }
-    if (cy + ph > inner.y + inner.h + 0.001) {
-      leftover.push(p);
-      continue;
-    }
-    packed.push({ id: p.id, x: round1(cx), y: round1(cy), w: pw, h: ph });
-    cx += pw + gap;
-    rowH = Math.max(rowH, ph);
-  }
-
-  if (packed.length === 0) {
-    toast('Selected segment is too small to pack these pallets', 'err');
-    return;
-  }
-
-  const posMap = new Map(packed.map(p => [p.id, p]));
-  z.pallets = z.pallets.map(p => posMap.has(p.id) ? Object.assign({}, p, posMap.get(p.id)) : p);
-  renderAll();
-  openZoneEditor(zid);
-  if (leftover.length > 0) {
-    toast('Packed ' + packed.length + ' pallets, ' + leftover.length + ' left untouched', 'inf');
-  } else {
-    toast('Packed ' + packed.length + ' pallets into segment ' + (segIdx + 1), 'ok');
-  }
-}
+// Also hide other forms when Quick Fill is opened
+const _origShowQuickFill = showQuickFillForm;
+showQuickFillForm = function(zid) {
+  const bf = document.getElementById('batchAddForm'); if (bf) bf.style.display = 'none';
+  const rf = document.getElementById('rowFillForm'); if (rf) rf.style.display = 'none';
+  _origShowQuickFill(zid);
+};
 
 // multi-select & batch
 function toggleMultiSel(zid, palId) {
@@ -2285,6 +2473,10 @@ function closeModal() {
   document.getElementById('modalBg').classList.remove('show');
   modalCb = null;
 }
+function openModalRaw(html) {
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalBg').classList.add('show');
+}
 
 /* =================================================================
    SAVE / LOAD
@@ -2313,7 +2505,15 @@ function loadLayout() {
         if (d.warehouses) {
           const normalized = normalizeServerLayout(d);
           warehouseData = normalized.warehouses;
-          currentWH = normalized.currentWH || 0;
+          const hasLegacyThreeSlotLayout = Array.isArray(d.warehouses)
+            && d.warehouses.length >= 3
+            && !d.warehouses.some(slot => slot && slot.warehouse && slot.warehouse.key);
+          currentWH = Number(d.currentWH || 0);
+          if (hasLegacyThreeSlotLayout) currentWH = Math.max(0, currentWH - 1);
+          if (![0, 1].includes(currentWH) || !warehouseData[currentWH]) {
+            currentWH = warehouseData[1] ? 1 : 0;
+          }
+          try { localStorage.setItem('whsims.currentWH', String(currentWH)); } catch (e2) {}
           if (warehouseData[currentWH]) loadSlotToCurrent(warehouseData[currentWH]);
         } else if (d.zones) {
           const normalizedSlot = normalizeSlotToCurrentWarehouse({
@@ -2321,22 +2521,26 @@ function loadLayout() {
             categories: d.categories,
             nextZId: d.nextZId,
             nextPId: d.nextPId,
-            nextCId: d.nextCId
+            nextCId: d.nextCId,
+            gasLights: d.gasLights,
+            nextGLId: d.nextGLId,
+            hazards: d.hazards,
+            nextHZId: d.nextHZId
           }, d.warehouse);
-          zones = normalizedSlot.zones;
+          zones = normalizedSlot.zones || [];
           zones.forEach(z => { if (!z.tags) z.tags = []; if (z.parentId === undefined) z.parentId = null; if (!z.pallets) z.pallets = []; if (!z.segs) z.segs = []; });
           if (normalizedSlot.categories) categories = normalizedSlot.categories;
           if (normalizedSlot.nextZId) nextZId = normalizedSlot.nextZId;
           if (normalizedSlot.nextPId) nextPId = normalizedSlot.nextPId;
           if (normalizedSlot.nextCId) nextCId = normalizedSlot.nextCId;
-          notes = normalizedSlot.notes || [];
-          nextNoteId = normalizedSlot.nextNoteId || nextNoteId;
+          gasLights = normalizedSlot.gasLights || [];
+          nextGLId = normalizedSlot.nextGLId || nextGLId;
+          hazards = normalizedSlot.hazards || [];
+          nextHZId = normalizedSlot.nextHZId || nextHZId;
           warehouseData[currentWH] = saveCurrentToSlot();
         }
-        WH_THEMES.forEach(t => { if (t) document.body.classList.remove(t); });
-        if (WH_THEMES[currentWH]) document.body.classList.add(WH_THEMES[currentWH]);
-        document.querySelectorAll('.wh-tab').forEach((tab, i) => tab.classList.toggle('active', i === currentWH));
-        sel = { zoneId: null, palletId: null, segIdx: null, gasLightId: null, noteId: null };
+        applyWarehouseTheme(currentWH);
+        sel = { zoneId: null, palletId: null, segIdx: null, gasLightId: null, hazardId: null };
         closeEditor();
         renderAll();
         toast('Layout loaded!', 'ok');
@@ -2389,25 +2593,20 @@ function randColor() {
    KEYBOARD SHORTCUTS
    ================================================================= */
 document.addEventListener('keydown', e => {
+  if (TUT.active) return; // let tutorial handler manage keys
   if (e.key === 'Escape') {
     if (document.body.classList.contains('pres')) { togglePresentation(); return; }
     if (document.getElementById('modalBg').classList.contains('show')) closeModal();
     else if (document.getElementById('editor').classList.contains('open')) closeEditor();
-    else { sel.zoneId = null; sel.palletId = null; sel.gasLightId = null; sel.noteId = null; renderAll(); }
+    else { sel.zoneId = null; sel.palletId = null; renderAll(); }
   }
-  if (e.key === 'Delete' && !e.target.closest('input,select,textarea')) {
-    if (sel.noteId) {
-      deleteNote(sel.noteId);
-    } else if (sel.gasLightId) {
-      deleteGasLight(sel.gasLightId);
-    } else if (sel.zoneId) {
-      if (multiSel.length > 0) {
-        batchDelete();
-      } else if (sel.palletId) {
-        removePal(sel.zoneId, sel.palletId);
-      } else {
-        deleteZone(sel.zoneId);
-      }
+  if (e.key === 'Delete' && sel.zoneId && !e.target.closest('input,select,textarea')) {
+    if (multiSel.length > 0) {
+      batchDelete();
+    } else if (sel.palletId) {
+      removePal(sel.zoneId, sel.palletId);
+    } else {
+      deleteZone(sel.zoneId);
     }
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 'a' && sel.zoneId && !e.target.closest('input,select,textarea')) {
@@ -2468,9 +2667,32 @@ function exportPNG() {
   // Warehouse border
   ctx.strokeStyle = expLight ? '#8b8ea8' : '#5c6088';
   ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 3]);
-  ctx.strokeRect(0, 0, WH.w, WH.h);
-  ctx.setLineDash([]);
+  if (currentWH === 1) {
+    // Tent-4: solid walls with door gap on top
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(T4_DOOR.x1, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(T4_DOOR.x2, 0); ctx.lineTo(WH.w, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, WH.h); ctx.lineTo(WH.w, WH.h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, WH.h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(WH.w, 0); ctx.lineTo(WH.w, WH.h); ctx.stroke();
+    // Door dashed green on top wall
+    ctx.strokeStyle = '#22c997'; ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(T4_DOOR.x1, 0); ctx.lineTo(T4_DOOR.x2, 0); ctx.stroke();
+    ctx.setLineDash([]);
+    // Columns
+    const cols = getT4Columns();
+    const half = T4_COL_SIZE / 2;
+    cols.forEach(c => {
+      ctx.fillStyle = '#f97316';
+      ctx.fillRect(c.x - half, c.y - half, T4_COL_SIZE, T4_COL_SIZE);
+      ctx.strokeStyle = '#c2410c'; ctx.lineWidth = 0.4;
+      ctx.strokeRect(c.x - half, c.y - half, T4_COL_SIZE, T4_COL_SIZE);
+    });
+  } else {
+    ctx.setLineDash([6, 3]);
+    ctx.strokeRect(0, 0, WH.w, WH.h);
+    ctx.setLineDash([]);
+  }
 
   // Zones
   zones.forEach(z => {
@@ -2536,6 +2758,45 @@ function exportPNG() {
     }
   });
 
+  // Gas lights in export
+  (gasLights || []).forEach(gl => {
+    ctx.beginPath();
+    ctx.arc(gl.x, gl.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = gl.status === 'on' ? '#f0b429' : '#6b7280';
+    ctx.fill();
+    ctx.fillStyle = expLight ? '#444' : '#ccc';
+    ctx.font = '3.5px IBM Plex Mono, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(gl.name, gl.x, gl.y + 9);
+  });
+
+  // Hazard markers in export
+  const HZ_EXP_COLORS = { red: '#ef4444', yellow: '#f59e0b', green: '#22c55e' };
+  (hazards || []).forEach(hz => {
+    const c = HZ_EXP_COLORS[hz.color] || '#ef4444';
+    const r = 5;
+    // Triangle
+    ctx.beginPath();
+    ctx.moveTo(hz.x, hz.y - r * 0.6);
+    ctx.lineTo(hz.x - r * 0.55, hz.y + r * 0.4);
+    ctx.lineTo(hz.x + r * 0.55, hz.y + r * 0.4);
+    ctx.closePath();
+    ctx.fillStyle = c;
+    ctx.fill();
+    // Exclamation
+    ctx.fillStyle = hz.color === 'yellow' ? '#000' : '#fff';
+    ctx.font = 'bold ' + (r * 0.6) + 'px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('!', hz.x, hz.y + r * 0.08);
+    // Label
+    ctx.fillStyle = c;
+    ctx.font = '3.5px IBM Plex Mono, monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(hz.name, hz.x, hz.y + r * 0.4 + 2);
+    ctx.textBaseline = 'alphabetic';
+  });
+
   // Side labels
   ctx.fillStyle = expLight ? '#8b8ea8' : '#5c6088';
   ctx.textBaseline = 'middle';
@@ -2566,8 +2827,8 @@ function exportPNG() {
   ctx.font = '6px IBM Plex Mono, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText((WH.lw || WH.w) + 'ft', WH.w / 2, -10);
-  ctx.fillText((WH.lw || WH.w) + 'ft', WH.w / 2, WH.h + 4);
+  ctx.fillText((WH.lw||WH.w) + 'ft', WH.w / 2, -10);
+  ctx.fillText((WH.lw||WH.w) + 'ft', WH.w / 2, WH.h + 4);
   ctx.textBaseline = 'bottom';
   ctx.fillStyle = expLight ? 'rgba(30,30,60,0.25)' : 'rgba(255,255,255,0.2)';
   ctx.font = '5px IBM Plex Mono, monospace';
@@ -2617,63 +2878,6 @@ function togglePresentation() {
   }
 }
 
-// ---- FIREBASE (disabled) ----
-// To re-enable: uncomment this block and the firebase lines in autoSave/autoLoad/init
-/*
-const firebaseConfig = {
-  apiKey: "AIzaSyCDsNhXCVambn0vKzlklR83YE4B5-BE7gs",
-  authDomain: "warehousemgmt-d781e.firebaseapp.com",
-  databaseURL: "https://warehousemgmt-d781e-default-rtdb.firebaseio.com",
-  projectId: "warehousemgmt-d781e",
-  storageBucket: "warehousemgmt-d781e.firebasestorage.app",
-  messagingSenderId: "316961805931",
-  appId: "1:316961805931:web:5d712d4f3b8c38cb27432e",
-  measurementId: "G-48ENR887R3"
-};
-
-let fbApp = null, fbDb = null, fbRef = null, fbReady = false, fbSkipNext = false;
-
-function loadFirebaseSDK() {
-  return new Promise((resolve) => {
-    if (typeof firebase !== 'undefined') { resolve(true); return; }
-    const s1 = document.createElement('script');
-    s1.src = 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js';
-    s1.onload = () => {
-      const s2 = document.createElement('script');
-      s2.src = 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js';
-      s2.onload = () => resolve(true);
-      s2.onerror = () => resolve(false);
-      document.head.appendChild(s2);
-    };
-    s1.onerror = () => resolve(false);
-    document.head.appendChild(s1);
-  });
-}
-
-let firebaseLoadPromise = Promise.resolve(false);
-if (firebaseConfig.apiKey !== 'YOUR_API_KEY') {
-  firebaseLoadPromise = loadFirebaseSDK().then(ok => {
-    if (ok && typeof firebase !== 'undefined') {
-      try {
-        fbApp = firebase.initializeApp(firebaseConfig);
-        fbDb = firebase.database();
-        fbRef = fbDb.ref('warehouse/layout');
-        fbReady = true;
-        return true;
-      } catch (e) { return false; }
-    }
-    return false;
-  });
-}
-*/
-let fbReady = false;
-
-// persistence (indexeddb)
-
-const DB_NAME = 'WHSims';
-const DB_VER = 1;
-const STORE = 'layout';
-
 let saveTimer = null;
 let pollTimer = null;
 let suppressAutoSave = false;
@@ -2682,7 +2886,6 @@ let googleAuthReady = false;
 let serverVersion = 0;
 let lastSavedPayload = '';
 let saveInFlight = false;
-let bootstrapDone = false;
 
 function setSyncStatus(text, color) {
   const dot = document.getElementById('syncDot');
@@ -2695,7 +2898,7 @@ function buildServerLayoutPayload() {
   warehouseData[currentWH] = saveCurrentToSlot();
   return {
     warehouse: WH_CONFIGS[currentWH] || WH,
-    warehouses: JSON.parse(JSON.stringify(warehouseData)).map((slot, idx) => {
+    warehouses: deepClone(warehouseData).map((slot, idx) => {
       if (!slot) return slot;
       slot.warehouse = { ...WH_CONFIGS[idx] };
       return slot;
@@ -2703,31 +2906,13 @@ function buildServerLayoutPayload() {
   };
 }
 
-
-
 function applyServerLayout(layout) {
   if (!layout || !Array.isArray(layout.warehouses)) return false;
-  layout = normalizeServerLayout(layout);
-
-  const localCurrentWH = [0, 1].includes(currentWH) ? currentWH : 0;
-  const localFallback = saveCurrentToSlot();
-
-  warehouseData = layout.warehouses.map((slot, idx) => {
-    if (slot) return slot;
-    if (idx === 0) return idx === localCurrentWH ? localFallback : JSON.parse(JSON.stringify(localFallback));
-    return null;
-  });
-
-  if (!warehouseData[0]) warehouseData[0] = localFallback;
-  currentWH = localCurrentWH;
+  const normalized = normalizeServerLayout(layout);
+  warehouseData = normalized.warehouses;
+  if (!warehouseData[currentWH]) currentWH = warehouseData[1] ? 1 : 0;
   try { localStorage.setItem('whsims.currentWH', String(currentWH)); } catch (e) {}
-
   if (warehouseData[currentWH]) loadSlotToCurrent(warehouseData[currentWH]);
-  else if (warehouseData[0]) {
-    currentWH = 0;
-    loadSlotToCurrent(warehouseData[0]);
-  }
-
   applyWarehouseTheme(currentWH);
   suppressAutoSave = true;
   try {
@@ -2750,8 +2935,8 @@ async function apiFetch(path, options = {}) {
   }, options));
 
   let data = null;
-  const ct = res.headers.get('content-type') || '';
-  if (ct.includes('application/json')) {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
     data = await res.json();
   } else {
     const text = await res.text();
@@ -2764,6 +2949,7 @@ async function apiFetch(path, options = {}) {
     err.payload = data;
     throw err;
   }
+
   return data;
 }
 
@@ -2783,7 +2969,6 @@ async function saveLayoutToServer(force = false) {
     });
     serverVersion = data.version || serverVersion;
     lastSavedPayload = payloadJson;
-    bootstrapDone = true;
     setSyncStatus('Synced', '#22c997');
   } catch (e) {
     console.error(e);
@@ -2801,12 +2986,11 @@ async function loadLayoutFromServer(opts = {}) {
   try {
     const data = await apiFetch('/api/layout');
     serverVersion = data.version || 0;
-    const hasRemote = data.layout && Array.isArray(data.layout.warehouses) && data.layout.warehouses.some(Boolean);
+    const hasRemoteLayout = data.layout && Array.isArray(data.layout.warehouses) && data.layout.warehouses.some(Boolean);
 
-    if (hasRemote) {
+    if (hasRemoteLayout) {
       applyServerLayout(data.layout);
       lastSavedPayload = JSON.stringify(buildServerLayoutPayload());
-      bootstrapDone = true;
       setSyncStatus('Synced', '#22c997');
       if (!silent) toast('Layout loaded from server', 'ok');
       return true;
@@ -2854,182 +3038,6 @@ function stopServerPolling() {
   pollTimer = null;
 }
 
-
-/* =================================================================
-   NOTES
-   ================================================================= */
-function addNoteMode() {
-  addingNote = true;
-  toast('Click on the map to place a note', 'inf');
-}
-
-function renderNotes() {
-  const nG = document.getElementById('notesG');
-  if (!nG) return;
-  nG.innerHTML = '';
-
-  (notes || []).forEach(n => {
-    const g = makeNS('g');
-    g.setAttribute('class', 'note-obj' + (sel.noteId === n.id ? ' sel' : ''));
-    g.setAttribute('data-noteid', n.id);
-
-    const circle = makeNS('circle');
-    setA(circle, {
-      cx: n.x,
-      cy: n.y,
-      r: 5,
-      fill: '#ef4444',
-      stroke: sel.noteId === n.id ? '#ffffff' : '#7f1d1d',
-      'stroke-width': sel.noteId === n.id ? 1.6 : 1.1
-    });
-    g.appendChild(circle);
-
-    const icon = makeNS('text');
-    setA(icon, {
-      x: n.x,
-      y: n.y + 1.8,
-      'text-anchor': 'middle',
-      'font-family': 'IBM Plex Mono',
-      'font-size': '4.2',
-      'font-weight': '700',
-      fill: '#ffffff',
-      'pointer-events': 'none'
-    });
-    icon.textContent = '!';
-    g.appendChild(icon);
-
-    const labelBg = makeNS('rect');
-    const labelText = String(n.text || 'Note');
-    const labelW = Math.max(18, Math.min(70, labelText.length * 2.9 + 8));
-    setA(labelBg, {
-      x: n.x + 7,
-      y: n.y - 7,
-      width: labelW,
-      height: 10,
-      rx: 2,
-      fill: 'rgba(11,13,20,0.82)',
-      stroke: 'rgba(239,68,68,0.45)',
-      'stroke-width': 0.6
-    });
-    g.appendChild(labelBg);
-
-    const text = makeNS('text');
-    setA(text, {
-      x: n.x + 11,
-      y: n.y,
-      'text-anchor': 'start',
-      'font-family': 'IBM Plex Mono',
-      'font-size': '3.5',
-      'font-weight': '600',
-      fill: '#ffffff',
-      'pointer-events': 'none'
-    });
-    text.textContent = labelText.length > 34 ? labelText.slice(0, 31) + '...' : labelText;
-    g.appendChild(text);
-
-    g.addEventListener('pointerdown', e => startNoteDrag(e, n.id));
-    g.addEventListener('dblclick', e => {
-      e.stopPropagation();
-      deleteNote(n.id);
-    });
-
-    nG.appendChild(g);
-  });
-}
-
-function selectNote(id) {
-  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, noteId: id };
-  renderAll();
-  openNoteEditor(id);
-}
-
-function startNoteDrag(e, noteId) {
-  e.stopPropagation();
-  selectNote(noteId);
-  const n = notes.find(x => x.id === noteId);
-  if (!n) return;
-
-  interacting = true;
-  const pt = s2svg(e.clientX, e.clientY);
-  const off = { dx: pt.x - n.x, dy: pt.y - n.y };
-
-  const onMove = ev => {
-    const mp = s2svg(ev.clientX, ev.clientY);
-    n.x = Math.max(0, Math.min(WH.w, mp.x - off.dx));
-    n.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
-    if (snap) {
-      n.x = doSnap(n.x);
-      n.y = doSnap(n.y);
-    }
-    renderAll();
-    showDimBadge(ev.clientX, ev.clientY, 'Note: ' + Math.round(n.x) + ',' + Math.round(n.y));
-  };
-
-  const onUp = () => {
-    interacting = false;
-    hideDimBadge();
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-    renderAll();
-    openNoteEditor(noteId);
-  };
-
-  document.addEventListener('pointermove', onMove);
-  document.addEventListener('pointerup', onUp);
-}
-
-function openNoteEditor(id) {
-  const n = notes.find(x => x.id === id);
-  if (!n) return;
-  const ed = document.getElementById('editor');
-  document.getElementById('edTitle').textContent = '⚠️ Note';
-  document.getElementById('edBody').innerHTML = `
-    <div class="fg">
-      <label>Note</label>
-      <textarea rows="4" style="resize:vertical" oninput="updateNote('${n.id}','text',this.value)">${esc(n.text || '')}</textarea>
-    </div>
-    <div class="fr">
-      <div class="fg" style="margin:0">
-        <label>X</label>
-        <input type="number" value="${Math.round(n.x)}" onchange="updateNote('${n.id}','x',+this.value)">
-      </div>
-      <div class="fg" style="margin:0">
-        <label>Y</label>
-        <input type="number" value="${Math.round(n.y)}" onchange="updateNote('${n.id}','y',+this.value)">
-      </div>
-    </div>
-    <div class="fg" style="font-size:12px;color:var(--text-3)">
-      Drag the marker to move it. Double-click it to delete fast.
-    </div>
-  `;
-  document.getElementById('edFoot').innerHTML = `
-    <button class="btn btn-d" onclick="deleteNote('${n.id}')"><i class="fas fa-trash"></i> Delete</button>
-    <button class="btn btn-p" onclick="closeEditor()"><i class="fas fa-check"></i> Done</button>
-  `;
-  ed.classList.add('open');
-}
-
-function updateNote(id, field, value) {
-  const n = notes.find(x => x.id === id);
-  if (!n) return;
-  if (field === 'x' || field === 'y') {
-    n[field] = Math.max(0, Math.min(field === 'x' ? WH.w : WH.h, Number(value) || 0));
-  } else {
-    n[field] = value;
-  }
-  renderAll();
-}
-
-function deleteNote(id) {
-  notes = notes.filter(x => x.id !== id);
-  if (sel.noteId === id) {
-    sel.noteId = null;
-    closeEditor();
-  }
-  renderAll();
-  toast('Note deleted', 'inf');
-}
-
 /* =================================================================
    GAS LIGHTS
    ================================================================= */
@@ -3037,8 +3045,8 @@ function addGasLight() {
   const gl = {
     id: glid(),
     name: 'Light ' + nextGLId,
-    x: round1(WH.w / 2 + Math.random() * 20 - 10),
-    y: round1(WH.h / 2 + Math.random() * 20 - 10),
+    x: WH.w / 2 + Math.random() * 20 - 10,
+    y: WH.h / 2 + Math.random() * 20 - 10,
     status: 'on',
     notes: ''
   };
@@ -3049,79 +3057,52 @@ function addGasLight() {
 }
 
 function selectGasLight(id) {
-  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: id, noteId: null };
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: id };
   openGasLightEditor(id);
-  renderAll();
-}
-
-function startGasLightDrag(e, glId) {
-  e.stopPropagation();
-  selectGasLight(glId);
-  const gl = gasLights.find(g => g.id === glId);
-  if (!gl) return;
-  interacting = true;
-  const pt = s2svg(e.clientX, e.clientY);
-  const off = { dx: pt.x - gl.x, dy: pt.y - gl.y };
-
-  const onMove = ev => {
-    const mp = s2svg(ev.clientX, ev.clientY);
-    gl.x = Math.max(0, Math.min(WH.w, mp.x - off.dx));
-    gl.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
-    if (snap) { gl.x = Math.round(gl.x / 5) * 5; gl.y = Math.round(gl.y / 5) * 5; }
-    renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${gl.name}: ${Math.round(gl.x)},${Math.round(gl.y)}`);
-  };
-  const onUp = () => {
-    interacting = false;
-    hideDimBadge();
-    document.removeEventListener('pointermove', onMove);
-    document.removeEventListener('pointerup', onUp);
-    renderAll();
-    openGasLightEditor(glId);
-  };
-  document.addEventListener('pointermove', onMove);
-  document.addEventListener('pointerup', onUp);
+  renderSVG();
 }
 
 function openGasLightEditor(id) {
   const gl = gasLights.find(g => g.id === id);
   if (!gl) return;
   const ed = document.getElementById('editor');
-  document.getElementById('edTitle').innerHTML = '<i class=\"fas fa-lightbulb\" style=\"color:#f0b429\"></i>&ensp;Gas Light';
-  document.getElementById('edBody').innerHTML = `
-    <div class=\"fg\">
+  document.getElementById('edTitle').innerHTML = '<i class="fas fa-lightbulb" style="color:#f0b429"></i>&ensp;Gas Light';
+  const body = document.getElementById('edBody');
+  body.innerHTML = `
+    <div class="fg">
       <label>Name</label>
-      <input type=\"text\" id=\"glName\" value=\"${esc(gl.name)}\" oninput=\"updateGasLight('\${gl.id}\','name',this.value)\">
+      <input type="text" id="glName" value="${esc(gl.name)}" oninput="updateGasLight('${gl.id}','name',this.value)">
     </div>
-    <div class=\"fg\">
+    <div class="fg">
       <label>Status</label>
-      <select id=\"glStatus\" onchange=\"updateGasLight('\${gl.id}\','status',this.value)\">
-        <option value=\"on\"${gl.status === 'on' ? ' selected' : ''}>Working</option>
-        <option value=\"off\"${gl.status === 'off' ? ' selected' : ''}>Not Working</option>
+      <select id="glStatus" onchange="updateGasLight('${gl.id}','status',this.value)">
+        <option value="on"${gl.status === 'on' ? ' selected' : ''}>Working</option>
+        <option value="off"${gl.status === 'off' ? ' selected' : ''}>Not Working</option>
       </select>
     </div>
-    <div class=\"fg\">
+    <div class="fg">
       <label>Position X (ft)</label>
-      <input type=\"number\" id=\"glX\" value=\"${Math.round(gl.x)}\" onchange=\"updateGasLight('\${gl.id}\','x',+this.value)\">
+      <input type="number" id="glX" value="${Math.round(gl.x)}" onchange="updateGasLight('${gl.id}','x',+this.value)">
     </div>
-    <div class=\"fg\">
+    <div class="fg">
       <label>Position Y (ft)</label>
-      <input type=\"number\" id=\"glY\" value=\"${Math.round(gl.y)}\" onchange=\"updateGasLight('\${gl.id}\','y',+this.value)\">
+      <input type="number" id="glY" value="${Math.round(gl.y)}" onchange="updateGasLight('${gl.id}','y',+this.value)">
     </div>
-    <div class=\"fg\">
+    <div class="fg">
       <label>Notes</label>
-      <textarea rows=\"3\" style=\"resize:vertical\" oninput=\"updateGasLight('\${gl.id}\','notes',this.value)\">${esc(gl.notes || '')}</textarea>
+      <textarea rows="3" style="resize:vertical" oninput="updateGasLight('${gl.id}','notes',this.value)">${esc(gl.notes || '')}</textarea>
     </div>
-    <div style=\"padding:8px 0;margin-top:8px;border-top:1px solid var(--border)\">
-      <div class=\"gl-status\" style=\"font-size:12px\">
-        <span class=\"gl-dot ${gl.status}\"></span>
+    <div style="padding:8px 0;margin-top:8px;border-top:1px solid var(--border)">
+      <div class="gl-status" style="font-size:12px">
+        <span class="gl-dot ${gl.status}"></span>
         <span>${gl.status === 'on' ? 'Operational' : 'Offline'}</span>
       </div>
     </div>
   `;
-  document.getElementById('edFoot').innerHTML = `
-    <button class=\"btn btn-d\" onclick=\"deleteGasLight('\${gl.id}\')\"><i class=\"fas fa-trash\"></i> Delete</button>
-    <button class=\"btn btn-p\" onclick=\"closeEditor()\"><i class=\"fas fa-check\"></i> Done</button>
+  const foot = document.getElementById('edFoot');
+  foot.innerHTML = `
+    <button class="btn btn-d" onclick="deleteGasLight('${gl.id}')"><i class="fas fa-trash"></i> Delete</button>
+    <button class="btn btn-p" onclick="closeEditor()"><i class="fas fa-check"></i> Done</button>
   `;
   ed.classList.add('open');
 }
@@ -3131,6 +3112,7 @@ function updateGasLight(id, field, value) {
   if (!gl) return;
   gl[field] = value;
   renderAll();
+  // re-open editor to refresh status display
   if (field === 'status') openGasLightEditor(id);
 }
 
@@ -3142,17 +3124,178 @@ function deleteGasLight(id) {
   toast('Gas Light removed', 'ok');
 }
 
+// ===== HAZARD MARKERS =====
+function showAddHazardModal() {
+  const id = 'hz-create-' + Date.now();
+  const html = `
+    <h3><i class="fas fa-exclamation-triangle" style="color:#ef4444"></i> New Hazard Marker</h3>
+    <div class="fg" style="margin-top:12px">
+      <label>Name</label>
+      <input type="text" id="${id}_name" placeholder="e.g. Roof Leak, Wet Floor..." style="font-size:14px">
+    </div>
+    <div class="fg">
+      <label>Severity</label>
+      <div style="display:flex;gap:8px;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:6px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-2);flex:1;justify-content:center">
+          <input type="radio" name="${id}_color" value="red" checked style="accent-color:#ef4444"> <span style="color:#ef4444;font-weight:600;font-size:13px">🔴 Red</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:6px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-2);flex:1;justify-content:center">
+          <input type="radio" name="${id}_color" value="yellow" style="accent-color:#f59e0b"> <span style="color:#f59e0b;font-weight:600;font-size:13px">🟡 Yellow</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:6px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-2);flex:1;justify-content:center">
+          <input type="radio" name="${id}_color" value="green" style="accent-color:#22c55e"> <span style="color:#22c55e;font-weight:600;font-size:13px">🟢 Green</span>
+        </label>
+      </div>
+    </div>
+    <div class="fg">
+      <label>Notes (optional)</label>
+      <textarea id="${id}_notes" rows="3" style="resize:vertical;font-size:13px" placeholder="Describe the issue..."></textarea>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn" style="flex:1;justify-content:center" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-p" style="flex:1;justify-content:center" onclick="doAddHazard('${id}')"><i class="fas fa-plus"></i> Create</button>
+    </div>
+  `;
+  openModalRaw(html);
+  setTimeout(() => { const inp = document.getElementById(id + '_name'); if (inp) inp.focus(); }, 100);
+}
+
+function doAddHazard(formId) {
+  const nameEl = document.getElementById(formId + '_name');
+  const notesEl = document.getElementById(formId + '_notes');
+  const colorEl = document.querySelector('input[name="' + formId + '_color"]:checked');
+  const name = (nameEl?.value || '').trim();
+  if (!name) { toast('Enter a name for the hazard', 'err'); nameEl?.focus(); return; }
+  const color = colorEl?.value || 'red';
+  const notes = (notesEl?.value || '').trim();
+
+  const hz = {
+    id: hzid(),
+    name: name,
+    x: WH.w / 2 + Math.random() * 30 - 15,
+    y: WH.h / 2 + Math.random() * 30 - 15,
+    color: color,
+    notes: notes
+  };
+  hazards.push(hz);
+  closeModal();
+  renderAll();
+  selectHazard(hz.id);
+  toast('Hazard "' + name + '" added', 'ok');
+}
+
+function selectHazard(id) {
+  sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, hazardId: id };
+  openHazardEditor(id);
+  renderSVG();
+}
+
+function openHazardEditor(id) {
+  const hz = hazards.find(h => h.id === id);
+  if (!hz) return;
+  const ed = document.getElementById('editor');
+  const HZ_COLOR_LABELS = { red: '🔴 Critical', yellow: '🟡 Warning', green: '🟢 Info' };
+  document.getElementById('edTitle').innerHTML = '<i class="fas fa-exclamation-triangle" style="color:' + ({red:'#ef4444',yellow:'#f59e0b',green:'#22c55e'}[hz.color] || '#ef4444') + '"></i>&ensp;Hazard';
+  const body = document.getElementById('edBody');
+  body.innerHTML = `
+    <div class="fg">
+      <label>Name</label>
+      <input type="text" id="hzName" value="${esc(hz.name)}" oninput="updateHazard('${hz.id}','name',this.value)">
+    </div>
+    <div class="fg">
+      <label>Severity</label>
+      <select id="hzColor" onchange="updateHazard('${hz.id}','color',this.value)">
+        <option value="red"${hz.color === 'red' ? ' selected' : ''}>🔴 Critical (Red)</option>
+        <option value="yellow"${hz.color === 'yellow' ? ' selected' : ''}>🟡 Warning (Yellow)</option>
+        <option value="green"${hz.color === 'green' ? ' selected' : ''}>🟢 Info (Green)</option>
+      </select>
+    </div>
+    <div class="fg">
+      <label>Position X (ft)</label>
+      <input type="number" id="hzX" value="${Math.round(hz.x)}" onchange="updateHazard('${hz.id}','x',+this.value)">
+    </div>
+    <div class="fg">
+      <label>Position Y (ft)</label>
+      <input type="number" id="hzY" value="${Math.round(hz.y)}" onchange="updateHazard('${hz.id}','y',+this.value)">
+    </div>
+    <div class="fg">
+      <label>Notes</label>
+      <textarea rows="4" style="resize:vertical" oninput="updateHazard('${hz.id}','notes',this.value)" placeholder="Describe the issue...">${esc(hz.notes || '')}</textarea>
+    </div>
+    <div style="padding:8px 0;margin-top:8px;border-top:1px solid var(--border)">
+      <div style="font-size:12px;display:flex;align-items:center;gap:6px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${{red:'#ef4444',yellow:'#f59e0b',green:'#22c55e'}[hz.color] || '#ef4444'}"></span>
+        <span style="font-weight:600">${HZ_COLOR_LABELS[hz.color] || hz.color}</span>
+      </div>
+      ${hz.notes ? '<div style="font-size:11px;color:var(--text-3);margin-top:4px;white-space:pre-wrap;max-height:80px;overflow-y:auto">' + esc(hz.notes) + '</div>' : ''}
+    </div>
+  `;
+  const foot = document.getElementById('edFoot');
+  foot.innerHTML = `
+    <button class="btn btn-d" onclick="deleteHazard('${hz.id}')"><i class="fas fa-trash"></i> Delete</button>
+    <button class="btn btn-p" onclick="closeEditor()"><i class="fas fa-check"></i> Done</button>
+  `;
+  ed.classList.add('open');
+}
+
+function updateHazard(id, field, value) {
+  const hz = hazards.find(h => h.id === id);
+  if (!hz) return;
+  hz[field] = value;
+  renderAll();
+  if (field === 'color') openHazardEditor(id);
+}
+
+function deleteHazard(id) {
+  const hz = hazards.find(h => h.id === id);
+  const name = hz ? hz.name : 'Hazard';
+  showModal('Delete hazard?', 'Remove "' + name + '" from the floor plan.', () => {
+    hazards = hazards.filter(h => h.id !== id);
+    sel.hazardId = null;
+    closeEditor();
+    renderAll();
+    toast('Hazard "' + name + '" removed', 'ok');
+  });
+}
+
+function startHazardDrag(e, hzId) {
+  e.stopPropagation();
+  selectHazard(hzId);
+  const hz = hazards.find(h => h.id === hzId);
+  if (!hz) return;
+  interacting = true;
+  const pt = s2svg(e.clientX, e.clientY);
+  const off = { dx: pt.x - hz.x, dy: pt.y - hz.y };
+
+  const onMove = ev => {
+    const mp = s2svg(ev.clientX, ev.clientY);
+    hz.x = Math.max(0, Math.min(WH.w, mp.x - off.dx));
+    hz.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
+    if (snap) { hz.x = Math.round(hz.x / 5) * 5; hz.y = Math.round(hz.y / 5) * 5; }
+    renderSVG();
+    showDimBadge(ev.clientX, ev.clientY, `${hz.name}: ${Math.round(hz.x)},${Math.round(hz.y)}`);
+  };
+  const onUp = () => {
+    interacting = false;
+    hideDimBadge();
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    renderAll();
+    openHazardEditor(hzId);
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+}
+
 function autoSave() {
   saveLayoutToServer(false);
 }
-
 
 function resetToDefaults() {
   showModal('Reset everything?', 'All zones, pallets, and categories will be reset to defaults. This cannot be undone.', async () => {
     stopServerPolling();
     serverVersion = 0;
     lastSavedPayload = '';
-    bootstrapDone = false;
     location.reload();
   });
 }
@@ -3170,6 +3313,7 @@ function renderAll() {
   if (!suppressAutoSave) scheduleAutoSave();
 }
 
+// init
 async function init() {
   renderSVG();
   renderSidebar();
@@ -3184,7 +3328,6 @@ async function init() {
 init();
 window.addEventListener('resize', () => setTimeout(zoomFit, 50));
 
-
 // tutorial
 const TUT = {
   active: false,
@@ -3192,19 +3335,22 @@ const TUT = {
   steps: [],
   savedVB: null,
   savedSB: null,
+  savedWH: null,
   animFrame: null,
+  pendingTimeout: null,
 };
 
 const tutSteps = [
   {
-    target: null, // Welcome splash handled separately
+    target: null,
     type: 'splash',
   },
+  // === CANVAS & NAVIGATION ===
   {
     target: '#canvasArea',
     icon: 'fa-map',
     title: 'Your Warehouse Canvas',
-    text: 'This is the interactive floor plan of your warehouse (400\u00d7180 ft). You can <strong>pan</strong> by clicking and dragging, and <strong>zoom</strong> with the scroll wheel. Everything is rendered in real-time.',
+    text: 'This is the interactive floor plan. <strong>Pan</strong> by clicking and dragging, <strong>zoom</strong> with the scroll wheel. Everything is rendered in real-time on an SVG canvas.',
     spotlight: 'canvas',
     zoom: { x: -20, y: -20, w: 440, h: 220 },
     cardPos: 'center',
@@ -3213,23 +3359,37 @@ const tutSteps = [
     target: '#whTabs',
     icon: 'fa-layer-group',
     title: 'Tent Tabs',
-    text: 'Switch between <strong>multiple tents</strong> instantly. Each tent has its own zones, pallets, and layout. Data is saved separately per tab.',
+    text: 'Switch between <strong>Tent\u20113</strong> (200\u00d785 ft) and <strong>Tent\u20114</strong> (800\u00d7260 ft). Each tent has its own zones, pallets, and layout saved separately.',
     spotlight: 'el',
     cardPos: 'below',
+  },
+  // === TENT-4 FEATURES ===
+  {
+    target: '#canvasArea',
+    icon: 'fa-columns',
+    title: 'Structural Columns (Tent\u20114)',
+    text: 'Tent\u20114 has <strong>structural columns</strong> placed every 26\u2009ft across the building in 4 rows (at 50, 130, 210, and 260\u2009ft from the top). These are <strong>orange squares</strong> on the map \u2014 zone tools automatically account for them.',
+    spotlight: 'canvas',
+    zoom: { x: 0, y: 30, w: 120, h: 100 },
+    cardPos: 'center',
+    action: () => { if (currentWH !== 1) switchWarehouse(1); },
   },
   {
-    target: '#syncStatus',
-    icon: 'fa-cloud',
-    title: 'Sync Status',
-    text: 'Shows whether your data is syncing with the <strong>server</strong>. When connected, changes are auto-saved and reflected across active sessions.',
-    spotlight: 'el',
-    cardPos: 'below',
+    target: '#canvasArea',
+    icon: 'fa-door-open',
+    title: 'Entrance (Tent\u20114)',
+    text: 'The <strong>entrance</strong> is on the top wall between the 2nd and 3rd column (green dashed line). Dimension annotations on the right show the exact spacing between column rows: 50\u2009ft, 80\u2009ft, 80\u2009ft, 50\u2009ft.',
+    spotlight: 'canvas',
+    zoom: { x: 10, y: -15, w: 80, h: 60 },
+    cardPos: 'center',
+    action: () => { if (currentWH !== 1) switchWarehouse(1); },
   },
+  // === ZONE MANAGEMENT ===
   {
     target: '.top-right .btn-g',
     icon: 'fa-plus-circle',
     title: 'Create a Zone',
-    text: 'Click here to add a new zone. You\'ll pick a <strong>category</strong> and <strong>subcategory</strong>, then the zone appears on the canvas ready to be positioned and resized.',
+    text: 'Click here to add a new zone. Pick a <strong>category</strong> and <strong>subcategory</strong>, then the zone appears on the canvas ready to be positioned and resized.',
     spotlight: 'el',
     cardPos: 'below',
   },
@@ -3238,12 +3398,11 @@ const tutSteps = [
       const z = zones[0];
       if (!z || !z.segs || !z.segs[0]) return null;
       const s = z.segs[0];
-      const r = svgToScreen(s.x, s.y, s.w, s.h);
-      return r;
+      return svgToScreen(s.x, s.y, s.w, s.h);
     },
     icon: 'fa-vector-square',
     title: 'Zones on the Canvas',
-    text: 'Each colored rectangle is a <strong>zone</strong>. Click any zone to select it \u2014 drag to <strong>move</strong>, use corner handles to <strong>resize</strong>. Double-click opens the full editor.',
+    text: 'Each colored rectangle is a <strong>zone</strong>. Click to select \u2014 drag to <strong>move</strong>, use corner handles to <strong>resize</strong>. The zone editor opens on the right with all details.',
     spotlight: 'fn',
     zoom: () => {
       const z = zones[0];
@@ -3254,6 +3413,32 @@ const tutSteps = [
     miniAnim: 'drag',
     cardPos: 'right',
   },
+  {
+    target: '#canvasArea',
+    icon: 'fa-sitemap',
+    title: 'Parent & Child Zones',
+    text: 'In the zone editor, assign a <strong>Parent Zone</strong> to nest zones inside containers. When you drag a parent zone, all its <strong>child zones move together</strong> \u2014 keeping your layout organized.',
+    spotlight: 'canvas',
+    cardPos: 'center',
+  },
+  // === PALLET TOOLS ===
+  {
+    target: '#canvasArea',
+    icon: 'fa-pallet',
+    title: 'Pallet Capacity Calculator',
+    text: 'In Tent\u20114, the zone editor shows a <strong>MAX PALLETS</strong> box \u2014 how many 4\u00d74\u2009ft pallets fit, with columns automatically excluded. Hit <strong>Set as Capacity</strong> to use this number for heatmap tracking.',
+    spotlight: 'canvas',
+    cardPos: 'center',
+  },
+  {
+    target: '#canvasArea',
+    icon: 'fa-th',
+    title: 'Quick Fill, Batch Add & Row Fill',
+    text: 'Three ways to add pallets: <strong>Quick Fill</strong> auto-generates a grid, <strong>Batch Add</strong> lets you name each pallet, and <strong>Row Fill</strong> creates organized rows. In Tent\u20114, all three skip column positions automatically.',
+    spotlight: 'canvas',
+    cardPos: 'center',
+  },
+  // === SIDEBAR & STATS ===
   {
     target: '#sidebar',
     icon: 'fa-list',
@@ -3270,7 +3455,7 @@ const tutSteps = [
     target: '#sbStats',
     icon: 'fa-chart-bar',
     title: 'Statistics Panel',
-    text: 'Live stats at the bottom of the sidebar: <strong>total zones</strong>, <strong>total pallets</strong>, and overall <strong>capacity usage</strong> with a visual progress bar.',
+    text: 'Live stats at the bottom: <strong>total zones</strong>, <strong>pallets</strong>, <strong>capacity usage</strong>. In Tent\u20114, a <strong>columns</strong> chip in the top bar shows the total structural column count.',
     spotlight: 'el',
     cardPos: 'right',
     action: () => {
@@ -3278,6 +3463,7 @@ const tutSteps = [
       if (sb.classList.contains('hide')) toggleSB();
     },
   },
+  // === TOOLS & FEATURES ===
   {
     target: '.top-right .btn[title="Categories"]',
     icon: 'fa-tags',
@@ -3306,7 +3492,7 @@ const tutSteps = [
     target: '.top-right .btn[title="Export PNG"]',
     icon: 'fa-camera',
     title: 'Export as Image',
-    text: 'Capture the entire warehouse layout as a <strong>high-resolution PNG</strong> image. Perfect for sharing with teammates or printing for the warehouse wall.',
+    text: 'Capture the entire layout as a <strong>high-resolution PNG</strong> \u2014 including columns and entrance for Tent\u20114. Perfect for sharing or printing.',
     spotlight: 'el',
     cardPos: 'below',
   },
@@ -3314,7 +3500,7 @@ const tutSteps = [
     target: '.top-right .btn[title="Presentation"]',
     icon: 'fa-tv',
     title: 'Presentation Mode',
-    text: 'Hides all UI panels for a <strong>clean, full-screen view</strong>. Great for meetings or displaying on a warehouse monitor. Press <strong>Esc</strong> to exit.',
+    text: 'Hides all UI for a <strong>clean, full-screen view</strong>. Great for meetings or warehouse monitors. Press <strong>Esc</strong> to exit.',
     spotlight: 'el',
     cardPos: 'below',
   },
@@ -3322,9 +3508,18 @@ const tutSteps = [
     target: '.top-right .btn[title="Save"]',
     icon: 'fa-save',
     title: 'Save & Load',
-    text: 'Download your layout as a <strong>JSON file</strong> for backup, or load a previously saved file. The working layout also auto-saves to the server.',
+    text: 'Download your layout as a <strong>JSON file</strong> for backup, or load a previously saved file. Data also auto-saves locally in your browser.',
     spotlight: 'el',
     cardPos: 'below',
+  },
+  // === KEYBOARD SHORTCUTS ===
+  {
+    target: '#canvasArea',
+    icon: 'fa-keyboard',
+    title: 'Keyboard Shortcuts',
+    text: '<strong>Delete</strong> \u2014 remove selected zone or pallet<br><strong>Ctrl+A</strong> \u2014 select all pallets in a zone<br><strong>Escape</strong> \u2014 close editor / exit presentation<br><strong>\u2190 \u2192</strong> \u2014 navigate this tutorial',
+    spotlight: 'canvas',
+    cardPos: 'center',
   },
   {
     target: null,
@@ -3484,6 +3679,7 @@ function showDragAnim(rect) {
 }
 
 function showStep(idx) {
+  if (!TUT.active && idx !== 0) return; // guard against stale callbacks
   TUT.step = idx;
   const step = tutSteps[idx];
   if (!step) { endTutorial(); return; }
@@ -3515,6 +3711,8 @@ function showStep(idx) {
     card.classList.remove('show');
     overlay.classList.remove('active');
     document.getElementById('tutPulse').classList.remove('active');
+    document.getElementById('tutProgress').classList.remove('active');
+    document.getElementById('tutCounter').classList.remove('active');
     positionSpotlight(null);
     hideMiniAnim();
 
@@ -3552,6 +3750,7 @@ function showStep(idx) {
     : 'Next <i class="fas fa-arrow-right"></i>';
 
   const doAfterZoom = () => {
+    if (!TUT.active) return; // tutorial was ended during animation
     let rect = null;
 
     if (step.spotlight === 'el') {
@@ -3571,18 +3770,19 @@ function showStep(idx) {
     positionSpotlight(rect);
     positionPulse(rect);
 
-      document.getElementById('tutCardIcon').innerHTML = '<i class="fas ' + step.icon + '"></i>';
+    document.getElementById('tutCardIcon').innerHTML = '<i class="fas ' + step.icon + '"></i>';
     document.getElementById('tutCardTitle').textContent = step.title;
     document.getElementById('tutCardText').innerHTML = step.text;
 
-      card.classList.remove('show');
-    setTimeout(() => {
+    card.classList.remove('show');
+    TUT.pendingTimeout = setTimeout(() => {
+      if (!TUT.active) return;
       positionCard(rect, step.cardPos);
       card.classList.add('show');
     }, 80);
 
-      if (step.miniAnim === 'drag' && rect) {
-      setTimeout(() => showDragAnim(rect), 500);
+    if (step.miniAnim === 'drag' && rect) {
+      setTimeout(() => { if (TUT.active) showDragAnim(rect); }, 500);
     }
   };
 
@@ -3594,7 +3794,7 @@ function showStep(idx) {
       positionSpotlight(null);
       positionPulse(null);
       animateVB(targetVB, 700, () => {
-        setTimeout(doAfterZoom, 100);
+        TUT.pendingTimeout = setTimeout(doAfterZoom, 100);
       });
     } else {
       doAfterZoom();
@@ -3622,12 +3822,19 @@ function startTutorial() {
   TUT.active = true;
   TUT.step = 0;
   TUT.savedVB = { ...vb };
+  TUT.savedWH = currentWH;
+  TUT.savedSB = !document.getElementById('sidebar').classList.contains('hide');
   closeEditor();
   showStep(0);
 }
 
 function endTutorial() {
   TUT.active = false;
+
+  // cancel pending animations/timeouts
+  if (TUT.animFrame) { cancelAnimationFrame(TUT.animFrame); TUT.animFrame = null; }
+  if (TUT.pendingTimeout) { clearTimeout(TUT.pendingTimeout); TUT.pendingTimeout = null; }
+
   const overlay = document.getElementById('tutOverlay');
   const card = document.getElementById('tutCard');
   const splash = document.getElementById('tutSplash');
@@ -3644,6 +3851,16 @@ function endTutorial() {
   positionSpotlight(null);
   hideMiniAnim();
 
+  // restore warehouse if changed
+  if (TUT.savedWH !== null && TUT.savedWH !== currentWH) {
+    switchWarehouse(TUT.savedWH);
+  }
+  // restore sidebar state
+  const sbVisible = !document.getElementById('sidebar').classList.contains('hide');
+  if (TUT.savedSB !== null && TUT.savedSB !== sbVisible) {
+    toggleSB();
+  }
+
   if (TUT.savedVB) {
     animateVB(fitVBToAspect(TUT.savedVB), 600);
   }
@@ -3656,9 +3873,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { tutPrev(); e.preventDefault(); }
 });
 
-
 /* =================================================================
-   AUTH — Google Sign-In + Role System (server-backed)
+   AUTH — Google Sign-In + Role System
    ================================================================= */
 
 let currentUser = null; // { email, name, picture, role }
@@ -3693,6 +3909,7 @@ function updateUserUI() {
   roleTag.className = 'role-tag ' + currentUser.role;
 
   document.getElementById('umAdminBtn').style.display = currentUser.role === 'admin' ? 'flex' : 'none';
+
   applyRole(currentUser.role);
 }
 
@@ -3776,7 +3993,6 @@ function toggleUserMenu() {
 }
 
 // close menu on outside click
-
 document.addEventListener('click', (e) => {
   const menu = document.getElementById('userMenu');
   const badge = document.getElementById('userBadge');
@@ -3785,6 +4001,7 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// admin panel
 async function openAdminPanel() {
   document.getElementById('userMenu').classList.remove('open');
   let users = [];
@@ -3796,7 +4013,6 @@ async function openAdminPanel() {
     toast(e.message || 'Could not load users', 'err');
     return;
   }
-
   let html = '<h3><i class="fas fa-users-cog"></i> User Management</h3>';
   html += '<p style="font-size:12px;color:var(--text-3);margin-bottom:12px">First registered user = Admin. Change roles below.</p>';
   html += '<div style="max-height:55vh;overflow-y:auto;margin:8px 0">';
@@ -3804,7 +4020,6 @@ async function openAdminPanel() {
   if (users.length === 0) {
     html += '<div style="text-align:center;padding:20px;color:var(--text-3)">No users yet</div>';
   }
-
   users.forEach(u => {
     const email = u.email;
     const initial = (u.name || email[0]).charAt(0).toUpperCase();

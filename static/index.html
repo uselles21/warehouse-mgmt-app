@@ -47,12 +47,12 @@
       <i class="fas fa-sun t-icon t-sun"></i>
     </button>
     <button class="tut-launch" onclick="startTutorial()" title="Tutorial"><i class="fas fa-graduation-cap"></i></button>
-    <button class="btn" onclick="openCategoryModal()" title="Categories"><i class="fas fa-tags"></i></button>
+    <button class="btn hide-s" onclick="openCategoryModal()" title="Categories"><i class="fas fa-tags"></i></button>
     <button class="btn btn-g" onclick="addNewZone()" title="New Zone"><i class="fas fa-plus"></i> <span class="hide-m">Zone</span></button>
-    <button class="btn btn-gl" onclick="addGasLight()" title="Add Gas Light"><i class="fas fa-lightbulb"></i> <span class="hide-m">Light</span></button>
-    <button class="btn" onclick="addNoteMode()" title="Add Note">⚠️</button>
-    <button class="btn" onclick="exportPNG()" title="Export PNG"><i class="fas fa-camera"></i></button>
-    <button class="btn" onclick="togglePresentation()" title="Presentation"><i class="fas fa-tv"></i></button>
+    <button class="btn btn-gl hide-s" onclick="addGasLight()" title="Add Gas Light"><i class="fas fa-lightbulb"></i> <span class="hide-m">Light</span></button>
+    <button class="btn btn-hz hide-s" onclick="showAddHazardModal()" title="Add Hazard"><i class="fas fa-exclamation-triangle"></i> <span class="hide-m">Hazard</span></button>
+    <button class="btn hide-s" onclick="exportPNG()" title="Export PNG"><i class="fas fa-camera"></i></button>
+    <button class="btn hide-s" onclick="togglePresentation()" title="Presentation"><i class="fas fa-tv"></i></button>
     <button class="btn" onclick="loadLayout()" title="Load"><i class="fas fa-upload"></i></button>
     <button class="btn btn-p" onclick="saveLayout()" title="Save"><i class="fas fa-save"></i></button>
     <div class="user-badge" id="userBadge" onclick="toggleUserMenu()" style="display:none">
@@ -107,7 +107,7 @@
         <g id="whBorder"></g>
         <g id="zonesG"></g>
         <g id="gasLightsG"></g>
-        <g id="notesG"></g>
+        <g id="hazardsG"></g>
         <g id="palletsG"></g>
         <g id="handlesG"></g>
         <g id="labelsG"></g>
@@ -187,6 +187,7 @@
     <div class="tut-nav-dots" id="tutDots"></div>
     <button class="tut-nav-btn tut-nav-next" id="tutNext" onclick="tutNext()">Next <i class="fas fa-arrow-right"></i></button>
   </div>
+  <button class="tut-nav-skip" id="tutSkip" onclick="endTutorial()" style="margin-top:6px;width:100%;text-align:center">Skip tutorial <i class="fas fa-times" style="font-size:10px;margin-left:4px"></i></button>
 </div>
 <div class="tut-splash" id="tutSplash">
   <div class="tut-splash-box" id="tutSplashBox"></div>
@@ -195,6 +196,8 @@
 <div class="tut-ghost-cursor" id="tutGhostCursor"><i class="fas fa-mouse-pointer"></i></div>
 
 <script src="app.js"></script>
+
+
 
 
 

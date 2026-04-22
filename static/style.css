@@ -1,3 +1,4 @@
+
 /* theme */
 :root {
   --bg-0: #0b0d14;
@@ -61,7 +62,8 @@ body { font-family:var(--font); background:var(--bg-0); color:var(--text-1); ove
   display:flex; align-items:center; justify-content:space-between;
   padding:0 16px; position:fixed; top:0; left:0; right:0; z-index:100;
 }
-.top-left { display:flex; align-items:center; gap:12px; }
+.top-left { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+.top-right { display:flex; gap:4px; align-items:center; flex-shrink:1; min-width:0; }
 .logo { font-family:var(--mono); font-size:16px; font-weight:700; color:var(--accent-h);
   display:flex; align-items:center; gap:7px; letter-spacing:-0.5px; }
 .logo i { font-size:17px; color:var(--accent); }
@@ -76,12 +78,11 @@ body { font-family:var(--font); background:var(--bg-0); color:var(--text-1); ove
 }
 .chip b { color:var(--text-1); }
 
-.top-right { display:flex; gap:6px; align-items:center; }
 .btn {
   display:inline-flex; align-items:center; gap:5px; padding:7px 12px;
   border:1px solid var(--border); border-radius:var(--radius-sm);
   background:var(--bg-2); color:var(--text-1); font-family:var(--font);
-  font-size:12px; font-weight:600; cursor:pointer; transition:all .15s; white-space:nowrap;
+  font-size:12px; font-weight:600; cursor:pointer; transition:background .15s, border-color .15s, color .15s, transform .15s, box-shadow .15s; white-space:nowrap;
 }
 .btn:hover { background:var(--bg-hover); border-color:var(--accent); }
 .btn:active { transform:scale(.97); }
@@ -444,11 +445,23 @@ html.light body.wh2 { --canvas-bg:#bdb8a8; --accent:#b45309; --accent-h:#d97706;
   .wh-tabs { margin-left:0; }
   .tab-label { display:none; }
   .wh-tab .tab-dot { width:9px; height:9px; }
+  .hide-m { display:none; }
+  .top-right .btn { padding:7px 8px; }
+  .theme-toggle, .tut-launch { width:30px; height:30px; font-size:12px; }
+}
+@media(max-width:700px) {
+  .hide-s { display:none !important; }
+  .top-right .btn { padding:6px 7px; }
+  .top-left { gap:6px; }
 }
 @media(max-width:600px) {
   :root { --sidebar-w:260px; }
-  .topbar { padding:0 10px; }
+  .topbar { padding:0 8px; gap:4px; }
+  .top-left { gap:6px; }
+  .top-right { gap:3px; }
   .logo { font-size:14px; }
+  .top-right .btn { padding:5px 6px; font-size:11px; }
+  .theme-toggle, .tut-launch { width:28px; height:28px; font-size:11px; }
 }
 
 /* tutorial */
@@ -536,7 +549,7 @@ html.light body.wh2 { --canvas-bg:#bdb8a8; --accent:#b45309; --accent-h:#d97706;
 .tut-nav-next:hover { filter:brightness(1.15); transform:translateY(-1px); }
 .tut-nav-skip {
   background:transparent; color:var(--text-3); font-weight:600; font-size:11px;
-  padding:6px 10px; border:none; cursor:pointer;
+  padding:6px 10px; border:none; cursor:pointer; font-family:var(--font);
 }
 .tut-nav-skip:hover { color:var(--red); }
 .tut-nav-dots {
@@ -808,6 +821,7 @@ body.role-viewer .zr { pointer-events:none !important; }
 body.role-viewer .pr { pointer-events:none !important; }
 body.role-viewer .rh { display:none !important; }
 body.role-viewer .btn-gl { display:none !important; }
+body.role-viewer .btn-hz { display:none !important; }
 body.role-viewer .gl-obj { pointer-events:none !important; }
 
 /* Tent-4 (wh3) theme — green/emerald */
@@ -822,6 +836,8 @@ html.light body.wh3 { --canvas-bg:#a8bdb5; --accent:#047857; --accent-h:#059669;
 /* Gas light button */
 .btn-gl { color:#f0b429; }
 .btn-gl:hover { background:rgba(240,180,41,.1); border-color:#f0b429; }
+.btn-hz { color:#ef4444; }
+.btn-hz:hover { background:rgba(239,68,68,.1); border-color:#ef4444; }
 
 /* Gas light SVG object */
 .gl-obj { cursor:pointer; transition:opacity .12s; }
