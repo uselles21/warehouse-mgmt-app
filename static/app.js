@@ -1247,11 +1247,8 @@ body.innerHTML = html || '<div style="text-align:center;padding:30px;color:var(-
 function syncTopbarLayout() {
   const bar = document.querySelector('.topbar');
   if (!bar) return;
-  document.body.classList.remove('topbar-compact', 'topbar-condensed');
-  if (bar.scrollWidth <= bar.clientWidth + 4) return;
-  document.body.classList.add('topbar-compact');
-  if (bar.scrollWidth <= bar.clientWidth + 4) return;
-  document.body.classList.add('topbar-condensed');
+  document.body.classList.remove('topbar-compact', 'topbar-condensed', 'topbar-minimal');
+  document.documentElement.style.setProperty('--topbar-h', `${Math.ceil(bar.offsetHeight)}px`);
 }
 
 function updateStats() {
@@ -3343,6 +3340,10 @@ window.addEventListener('resize', () => {
   setTimeout(zoomFit, 50);
   requestAnimationFrame(syncTopbarLayout);
 });
+window.addEventListener('load', () => requestAnimationFrame(syncTopbarLayout));
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => requestAnimationFrame(syncTopbarLayout));
+}
 
 // tutorial
 const TUT = {
