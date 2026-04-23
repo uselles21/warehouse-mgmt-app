@@ -343,6 +343,7 @@ if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matc
 function toggleTheme() {
   themeMode = themeMode === 'dark' ? 'light' : 'dark';
   document.documentElement.classList.toggle('light', themeMode === 'light');
+  requestAnimationFrame(syncTopbarLayout);
 }
 
 /* =================================================================
@@ -1240,7 +1241,17 @@ function renderSidebar() {
     html += hzHtml;
   }
 
-  body.innerHTML = html || '<div style="text-align:center;padding:30px;color:var(--text-3)"><i class="fas fa-search" style="font-size:24px;display:block;margin-bottom:8px"></i>Nothing found</div>';
+body.innerHTML = html || '<div style="text-align:center;padding:30px;color:var(--text-3)"><i class="fas fa-search" style="font-size:24px;display:block;margin-bottom:8px"></i>Nothing found</div>';
+}
+
+function syncTopbarLayout() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return;
+  document.body.classList.remove('topbar-compact', 'topbar-condensed');
+  if (bar.scrollWidth <= bar.clientWidth + 4) return;
+  document.body.classList.add('topbar-compact');
+  if (bar.scrollWidth <= bar.clientWidth + 4) return;
+  document.body.classList.add('topbar-condensed');
 }
 
 function updateStats() {
@@ -1257,6 +1268,7 @@ function updateStats() {
     ${colChip}
     ${hazards.length > 0 ? '<div class="chip"><i class="fas fa-exclamation-triangle"></i> <b>' + hazards.length + '</b> hazards</div>' : ''}
     <div class="chip"><i class="fas fa-chart-pie"></i> <b>${pct}%</b></div>`;
+  requestAnimationFrame(syncTopbarLayout);
 
   document.getElementById('sbStats').innerHTML = `
     <div class="st-grid">
@@ -3322,11 +3334,15 @@ async function init() {
   applyWarehouseTheme(currentWH);
   setTimeout(zoomFit, 100);
   setSyncStatus('Sign in required', '#6b7280');
+  requestAnimationFrame(syncTopbarLayout);
   initGoogleAuth();
   await restoreSession();
 }
 init();
-window.addEventListener('resize', () => setTimeout(zoomFit, 50));
+window.addEventListener('resize', () => {
+  setTimeout(zoomFit, 50);
+  requestAnimationFrame(syncTopbarLayout);
+});
 
 // tutorial
 const TUT = {
@@ -3911,6 +3927,7 @@ function updateUserUI() {
   document.getElementById('umAdminBtn').style.display = currentUser.role === 'admin' ? 'flex' : 'none';
 
   applyRole(currentUser.role);
+  requestAnimationFrame(syncTopbarLayout);
 }
 
 async function finalizeLogin(user, opts = {}) {
@@ -3984,6 +4001,7 @@ async function doLogout() {
   document.body.classList.remove('role-admin', 'role-editor', 'role-viewer');
   document.getElementById('loginOverlay').style.display = 'flex';
   setSyncStatus('Signed out', '#6b7280');
+  requestAnimationFrame(syncTopbarLayout);
   toast('Signed out', 'inf');
 }
 
