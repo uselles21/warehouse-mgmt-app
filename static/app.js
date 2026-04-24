@@ -1251,6 +1251,11 @@ function syncTopbarLayout() {
   document.documentElement.style.setProperty('--topbar-h', `${Math.ceil(bar.offsetHeight)}px`);
 }
 
+function syncTopbarAndFit() {
+  syncTopbarLayout();
+  zoomFit();
+}
+
 function updateStats() {
   const tP = zones.reduce((s, z) => s + z.pallets.length, 0);
   const tC = zones.reduce((s, z) => s + z.capacity, 0);
@@ -2931,7 +2936,7 @@ function applyServerLayout(layout) {
   } finally {
     suppressAutoSave = false;
   }
-  setTimeout(zoomFit, 80);
+  setTimeout(syncTopbarAndFit, 80);
   return true;
 }
 
@@ -3329,7 +3334,7 @@ async function init() {
   updateStats();
   document.getElementById('snapBtn').classList.add('on');
   applyWarehouseTheme(currentWH);
-  setTimeout(zoomFit, 100);
+  setTimeout(syncTopbarAndFit, 100);
   setSyncStatus('Sign in required', '#6b7280');
   requestAnimationFrame(syncTopbarLayout);
   initGoogleAuth();
@@ -3337,12 +3342,11 @@ async function init() {
 }
 init();
 window.addEventListener('resize', () => {
-  setTimeout(zoomFit, 50);
-  requestAnimationFrame(syncTopbarLayout);
+  setTimeout(syncTopbarAndFit, 50);
 });
-window.addEventListener('load', () => requestAnimationFrame(syncTopbarLayout));
+window.addEventListener('load', () => requestAnimationFrame(syncTopbarAndFit));
 if (document.fonts && document.fonts.ready) {
-  document.fonts.ready.then(() => requestAnimationFrame(syncTopbarLayout));
+  document.fonts.ready.then(() => requestAnimationFrame(syncTopbarAndFit));
 }
 
 // tutorial
