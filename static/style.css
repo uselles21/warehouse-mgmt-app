@@ -160,6 +160,9 @@ body { font-family:var(--font); background:var(--bg-0); color:var(--text-1); ove
 /* canvas */
 .canvas-area { flex:1; position:relative; overflow:hidden; background:var(--canvas-bg); }
 .canvas-area svg { width:100%; height:100%; user-select:none; -webkit-user-select:none; }
+.canvas-area.measure-mode,
+.canvas-area.measure-mode svg,
+.measure-capture { cursor:crosshair; }
 .canvas-area.grabbing { cursor:grabbing; }
 .canvas-area:not(.grabbing) { cursor:grab; }
 
@@ -420,6 +423,34 @@ body.pres .pres-watermark { display:block; }
 .hm-swatch { width:14px; height:10px; border-radius:2px; }
 .hm-label { color:var(--text-2); font-family:var(--mono); }
 
+.measure-line {
+  stroke:var(--yellow);
+  stroke-dasharray:6 4;
+  fill:none;
+  vector-effect:non-scaling-stroke;
+}
+.measure-point {
+  fill:var(--yellow);
+  stroke:#fff;
+  vector-effect:non-scaling-stroke;
+}
+.measure-label-bg {
+  fill:rgba(11,13,20,.88);
+  stroke:var(--yellow);
+  vector-effect:non-scaling-stroke;
+}
+.measure-label {
+  fill:#fff;
+  font-family:var(--mono);
+  font-weight:700;
+  pointer-events:none;
+}
+html.light .measure-label-bg {
+  fill:rgba(241,235,226,.94);
+  stroke:#b45309;
+}
+html.light .measure-label { fill:var(--text-1); }
+
 /* warehouse tabs */
 .wh-tabs { display:flex; gap:3px; margin-left:0; min-width:0; flex-wrap:wrap; }
 .wh-tab {
@@ -440,6 +471,14 @@ body.wh2 .logo i { color:var(--accent); }
 body.wh2 .wh-tab.active { background:var(--accent); border-color:var(--accent); }
 html.light body.wh2 { --canvas-bg:#bdb8a8; --accent:#b45309; --accent-h:#d97706;
   --accent-glow:rgba(180,83,9,0.12); }
+
+body.wh4 { --accent:#0284c7; --accent-h:#38bdf8; --accent-glow:rgba(56,189,248,0.28);
+  --canvas-bg:#09131a; --border-focus:#0284c7; }
+body.wh4 .logo { color:var(--accent-h); }
+body.wh4 .logo i { color:var(--accent); }
+body.wh4 .wh-tab.active { background:var(--accent); border-color:var(--accent); }
+html.light body.wh4 { --canvas-bg:#b8cad1; --accent:#0369a1; --accent-h:#0ea5e9;
+  --accent-glow:rgba(14,165,233,0.12); }
 
 /* responsive */
 @media(max-width:900px) {

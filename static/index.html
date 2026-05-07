@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&amp;family=Outfit:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-<link rel="stylesheet" href="style.css?v=20260424-1">
+<link rel="stylesheet" href="style.css?v=20260425-2">
 </head>
 <body>
 
@@ -30,10 +30,7 @@
     <div class="top-sep"></div>
     <div class="wh-dims" id="whDimsLabel">200 × 85 ft</div>
     <div class="top-sep"></div>
-    <div class="wh-tabs" id="whTabs">
-      <div class="wh-tab active" onclick="switchWarehouse(0)"><span class="tab-dot" style="background:#f59e0b"></span><span class="tab-label">Tent-3</span></div>
-      <div class="wh-tab" onclick="switchWarehouse(1)"><span class="tab-dot" style="background:#10b981"></span><span class="tab-label">Tent-4</span></div>
-    </div>
+    <div class="wh-tabs" id="whTabs"></div>
     <div class="top-sep"></div>
     <div class="wh-dims" id="syncStatus" style="display:flex;align-items:center;gap:4px">
       <span id="syncDot" style="width:7px;height:7px;border-radius:50%;background:#6b7280"></span>
@@ -110,6 +107,7 @@
         <g id="hazardsG"></g>
         <g id="palletsG"></g>
         <g id="handlesG"></g>
+        <g id="measureG"></g>
         <g id="labelsG"></g>
       </g>
     </svg>
@@ -128,6 +126,7 @@
       <button class="btn btn-i" onclick="zoomFit()" title="Fit"><i class="fas fa-expand"></i></button>
       <button class="btn btn-i" id="snapBtn" onclick="toggleSnap()" title="Snap to Grid"><i class="fas fa-magnet"></i></button>
       <button class="btn btn-i" id="heatBtn" onclick="toggleHeatMap()" title="Heat Map"><i class="fas fa-fire"></i></button>
+      <button class="btn btn-i" id="measureBtn" onclick="toggleMeasureMode()" title="Measure Distance"><i class="fas fa-ruler-combined"></i></button>
     </div>
     <div class="batch-bar" id="batchBar">
       <span class="batch-count" id="batchCount">0 selected</span>
@@ -195,7 +194,7 @@
 <div class="tut-ghost-zone" id="tutGhostZone"></div>
 <div class="tut-ghost-cursor" id="tutGhostCursor"><i class="fas fa-mouse-pointer"></i></div>
 
-<script src="app.js?v=20260424-1"></script>
+<script src="app.js?v=20260425-2"></script>
 
 
 

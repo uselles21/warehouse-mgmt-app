@@ -8,6 +8,7 @@ const POLL_INTERVAL_MS = 3000;
 const WH_CONFIGS = [
   { key: 'tent3', name: 'Tent-3', w: 400, h: 180, lw: 200, lh: 85, unit: 'ft' },
   { key: 'tent4', name: 'Tent-4', w: 800, h: 260, lw: 800, lh: 260, unit: 'ft' },
+  { key: 'tent5', name: 'Tent-5', w: 400, h: 180, lw: 200, lh: 85, unit: 'ft' },
 ];
 let WH = { ...WH_CONFIGS[0] };
 
@@ -118,6 +119,7 @@ function zid() { return 'z' + (nextZId++); }
 function pid() { return 'p' + (nextPId++); }
 function round1(v) { return Math.round(v * 10) / 10; }
 function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+function $(id) { return document.getElementById(id); }
 
 function getSlotExtent(slot) {
   let maxX = 0;
@@ -229,15 +231,47 @@ let sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, hazard
 let multiSel = []; // {zid, pid}[]
 let snap = true;
 let heatMapOn = false;
+let measureMode = false;
+let measureStart = null;
+let measureEnd = null;
+let measureHover = null;
 const SNAP_GRID = 5;
+
+function getDefaultWarehouseData() {
+  return Array.from({ length: WH_CONFIGS.length }, () => null);
+}
+
+function getFirstAvailableWarehouseIndex(slots = warehouseData) {
+  const idx = Array.isArray(slots) ? slots.findIndex(Boolean) : -1;
+  return idx >= 0 ? idx : 0;
+}
+
+function isValidWarehouseIndex(idx) {
+  return Number.isInteger(idx) && idx >= 0 && idx < WH_CONFIGS.length;
+}
 
 /* =================================================================
    MULTI-WAREHOUSE SUPPORT
    ================================================================= */
 let currentWH = Number(localStorage.getItem('whsims.currentWH') || '0');
-if (![0, 1].includes(currentWH)) currentWH = 0;
-const WH_THEMES = ['wh2', 'wh3']; // CSS class per warehouse (Tent-3=orange, Tent-4=green)
-const WH_ACCENTS = ['#f59e0b', '#10b981']; // tab dot colors
+if (!isValidWarehouseIndex(currentWH)) currentWH = 0;
+const WH_THEMES = ['wh2', 'wh3', 'wh4']; // CSS class per warehouse
+const WH_ACCENTS = ['#f59e0b', '#10b981', '#38bdf8']; // tab dot colors
+
+function createBlankWarehouseSlot(idx) {
+  return {
+    zones: [],
+    categories: JSON.parse(JSON.stringify((warehouseData[0] && warehouseData[0].categories) || categories)),
+    nextZId: 500,
+    nextPId: 5000,
+    nextCId: 100,
+    gasLights: [],
+    nextGLId: 1,
+    hazards: [],
+    nextHZId: 1,
+    warehouse: { ...WH_CONFIGS[idx] }
+  };
+}
 
 function saveCurrentToSlot() {
   return {
@@ -263,21 +297,46 @@ function loadSlotToCurrent(slot) {
   hazards = slot.hazards || []; nextHZId = slot.nextHZId || nextHZId;
 }
 
-let warehouseData = [null, null]; // filled in init (Tent-3, Tent-4)
+let warehouseData = getDefaultWarehouseData();
+
+function syncWarehouseNamesFromSlots(slots) {
+  (slots || []).forEach((slot, idx) => {
+    const nextName = slot && slot.warehouse && typeof slot.warehouse.name === 'string'
+      ? slot.warehouse.name.trim()
+      : '';
+    if (nextName && WH_CONFIGS[idx]) WH_CONFIGS[idx].name = nextName;
+  });
+}
+
+function renderWarehouseTabs() {
+  const tabs = document.getElementById('whTabs');
+  if (!tabs) return;
+  tabs.innerHTML = WH_CONFIGS.map((cfg, idx) => `
+    <div class="wh-tab ${idx === currentWH ? 'active' : ''}"
+      onclick="switchWarehouse(${idx})"
+      ondblclick="event.stopPropagation(); renameWarehouse(${idx})"
+      title="Click to switch. Double-click to rename.">
+      <span class="tab-dot" style="background:${WH_ACCENTS[idx]}"></span>
+      <span class="tab-label">${esc(cfg.name)}</span>
+    </div>
+  `).join('');
+  requestAnimationFrame(syncTopbarLayout);
+}
 
 function migrateLegacyWarehouses(warehouses) {
-  if (!Array.isArray(warehouses)) return [null, null];
+  if (!Array.isArray(warehouses)) return getDefaultWarehouseData();
   const slots = warehouses.slice();
   const hasMetadata = slots.some(slot => slot && slot.warehouse && slot.warehouse.key);
-  if (hasMetadata) return slots.slice(0, 2);
-  if (slots.length === 2) return [slots[1] || null, null];
-  if (slots.length >= 3) return [slots[1] || null, slots[2] || null];
-  return [slots[0] || null, slots[1] || null];
+  if (hasMetadata) return WH_CONFIGS.map((_, idx) => slots[idx] || null);
+  if (slots.length === 2) return [slots[1] || null, null, null];
+  if (slots.length >= 3) return [slots[1] || null, slots[2] || null, slots[3] || null];
+  return [slots[0] || null, slots[1] || null, slots[2] || null];
 }
 
 function normalizeServerLayout(layout) {
   if (!layout || !Array.isArray(layout.warehouses)) return layout;
   const migrated = migrateLegacyWarehouses(layout.warehouses);
+  syncWarehouseNamesFromSlots(migrated);
   return {
     warehouse: WH_CONFIGS[currentWH] || WH,
     warehouses: migrated.map((slot, idx) => {
@@ -286,7 +345,7 @@ function normalizeServerLayout(layout) {
         ? slot.warehouse
         : (idx === 0 ? LEGACY_WH : WH_CONFIGS[idx]);
       const normalized = normalizeSlotToWarehouse(slot, WH_CONFIGS[idx], declared);
-      normalized.warehouse = { ...WH_CONFIGS[idx] };
+      normalized.warehouse = { ...WH_CONFIGS[idx], name: (slot.warehouse && slot.warehouse.name) || WH_CONFIGS[idx].name };
       if (!normalized.gasLights) normalized.gasLights = [];
       if (!normalized.nextGLId) normalized.nextGLId = 1;
       if (!normalized.hazards) normalized.hazards = [];
@@ -303,12 +362,11 @@ function applyWarehouseTheme(idx) {
   WH = { ...WH_CONFIGS[idx] };
   const label = document.getElementById('whDimsLabel');
   if (label) label.textContent = `${WH.lw || WH.w} × ${WH.lh || WH.h} ft`;
-  document.querySelectorAll('.wh-tab').forEach((tab, i) => {
-    tab.classList.toggle('active', i === idx);
-  });
+  renderWarehouseTabs();
 }
 
 function switchWarehouse(idx) {
+  if (!isValidWarehouseIndex(idx)) return;
   if (idx === currentWH) return;
   warehouseData[currentWH] = saveCurrentToSlot();
   currentWH = idx;
@@ -316,19 +374,39 @@ function switchWarehouse(idx) {
   if (warehouseData[idx]) {
     loadSlotToCurrent(warehouseData[idx]);
   } else {
-    zones = [];
-    gasLights = [];
-    hazards = [];
-    categories = JSON.parse(JSON.stringify((warehouseData[0] && warehouseData[0].categories) || categories));
-    nextZId = 500; nextPId = 5000; nextCId = 100; nextGLId = 1; nextHZId = 1;
-    warehouseData[idx] = saveCurrentToSlot();
+    warehouseData[idx] = createBlankWarehouseSlot(idx);
+    loadSlotToCurrent(warehouseData[idx]);
   }
   applyWarehouseTheme(idx);
   sel = { zoneId: null, segIdx: null, palletId: null, gasLightId: null, hazardId: null };
+  measureMode = false;
+  clearMeasurement();
+  syncMeasureUI();
   closeEditor();
   renderAll();
   setTimeout(zoomFit, 50);
   toast('Switched to ' + (WH_CONFIGS[idx]?.name || ('Tent-' + (idx + 3))), 'inf');
+}
+
+function renameWarehouse(idx) {
+  if (!isValidWarehouseIndex(idx)) return;
+  const currentName = WH_CONFIGS[idx].name || `Tent-${idx + 3}`;
+  const next = prompt('Rename tent', currentName);
+  if (next === null) return;
+  const name = next.trim();
+  if (!name) {
+    toast('Tent name cannot be empty', 'err');
+    return;
+  }
+  WH_CONFIGS[idx].name = name.slice(0, 32);
+  warehouseData[idx] = warehouseData[idx] || (idx === currentWH ? saveCurrentToSlot() : createBlankWarehouseSlot(idx));
+  warehouseData[idx].warehouse = { ...(warehouseData[idx].warehouse || {}), ...WH_CONFIGS[idx] };
+  if (idx === currentWH) WH = { ...WH_CONFIGS[idx] };
+  renderWarehouseTabs();
+  if (currentUser && currentUser.role !== 'viewer') {
+    saveLayoutToServer(true);
+  }
+  toast('Tent renamed to ' + WH_CONFIGS[idx].name, 'ok');
 }
 
 /* =================================================================
@@ -361,6 +439,7 @@ let panStart = { x: 0, y: 0 };
 function applyVB() {
   svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
   document.getElementById('zoomD').textContent = Math.round(zoom * 100) + '%';
+  renderMeasurementOverlay();
 }
 
 function s2svg(sx, sy) {
@@ -374,6 +453,7 @@ function doSnap(v) { return snap ? Math.round(v / SNAP_GRID) * SNAP_GRID : Math.
 let interacting = false; // true when dragging zone/pallet/handle
 
 cArea.addEventListener('pointerdown', e => {
+  if (measureMode) return;
   if (interacting) return;
   if (e.target.closest('.zr') || e.target.closest('.pr') || e.target.closest('.rh') || e.target.closest('.gl-obj')) return;
   if (e.target.closest('.sb-toggle') || e.target.closest('.ctb') || e.target.closest('.hm-legend') || e.target.closest('button')) return;
@@ -462,6 +542,173 @@ function toggleSnap() {
   snap = !snap;
   document.getElementById('snapBtn').classList.toggle('on', snap);
   toast(snap ? 'Snap to grid: ON' : 'Snap to grid: OFF', 'inf');
+}
+
+function clearMeasurement() {
+  measureStart = null;
+  measureEnd = null;
+  measureHover = null;
+}
+
+function syncMeasureUI() {
+  cArea.classList.toggle('measure-mode', measureMode);
+  document.getElementById('measureBtn')?.classList.toggle('on', measureMode);
+}
+
+function getWarehouseDisplayScale(wh = WH) {
+  const width = Number(wh?.w) || 1;
+  const height = Number(wh?.h) || 1;
+  return {
+    x: (Number(wh?.lw) || width) / width,
+    y: (Number(wh?.lh) || height) / height
+  };
+}
+
+function toWarehouseDisplayX(value, wh = WH) {
+  return value * getWarehouseDisplayScale(wh).x;
+}
+
+function toWarehouseDisplayY(value, wh = WH) {
+  return value * getWarehouseDisplayScale(wh).y;
+}
+
+function roundWarehouseDisplayValue(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function formatWarehouseDisplayCoord(x, y, wh = WH) {
+  const dx = roundWarehouseDisplayValue(toWarehouseDisplayX(x, wh));
+  const dy = roundWarehouseDisplayValue(toWarehouseDisplayY(y, wh));
+  return `${dx},${dy}`;
+}
+
+function formatWarehouseDisplaySize(w, h, wh = WH) {
+  const dw = roundWarehouseDisplayValue(toWarehouseDisplayX(w, wh));
+  const dh = roundWarehouseDisplayValue(toWarehouseDisplayY(h, wh));
+  return `${dw} × ${dh} ${wh.unit || 'ft'}`;
+}
+
+function formatMeasureDistance(a, b) {
+  const scale = getWarehouseDisplayScale();
+  const dist = Math.hypot((b.x - a.x) * scale.x, (b.y - a.y) * scale.y);
+  const rounded = dist >= 100 ? Math.round(dist) : roundWarehouseDisplayValue(dist);
+  return `${rounded} ${WH.unit || 'ft'}`;
+}
+
+function handleMeasurePoint(e) {
+  if (!measureMode) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const pt = s2svg(e.clientX, e.clientY);
+  if (!measureStart || measureEnd) {
+    measureStart = pt;
+    measureEnd = null;
+    measureHover = pt;
+    renderMeasurementOverlay();
+    return;
+  }
+  measureEnd = pt;
+  measureHover = null;
+  renderMeasurementOverlay();
+  toast(`Distance: ${formatMeasureDistance(measureStart, measureEnd)}`, 'ok');
+}
+
+function handleMeasurePreview(e) {
+  if (!measureMode || !measureStart || measureEnd) return;
+  measureHover = s2svg(e.clientX, e.clientY);
+  renderMeasurementOverlay();
+}
+
+function renderMeasurementOverlay() {
+  const g = document.getElementById('measureG');
+  if (!g) return;
+  g.innerHTML = '';
+
+  if (measureMode) {
+    const capture = makeNS('rect');
+    setA(capture, { x: -2000, y: -2000, width: 8000, height: 8000, fill: 'transparent' });
+    capture.classList.add('measure-capture');
+    capture.addEventListener('pointerdown', handleMeasurePoint);
+    capture.addEventListener('pointermove', handleMeasurePreview);
+    capture.addEventListener('pointerleave', () => {
+      if (!measureMode || !measureStart || measureEnd) return;
+      measureHover = measureStart;
+      renderMeasurementOverlay();
+    });
+    g.appendChild(capture);
+  }
+
+  const endPoint = measureEnd || measureHover;
+  if (!measureStart || !endPoint) return;
+
+  const scale = Math.max(zoom, 0.35);
+  const strokeW = 1.4 / scale;
+  const pointR = 3.4 / scale;
+  const fontSize = 5 / scale;
+  const padX = 4 / scale;
+  const padY = 2.5 / scale;
+  const labelText = formatMeasureDistance(measureStart, endPoint);
+  const labelWidth = Math.max((labelText.length * fontSize * 0.62) + padX * 2, 24 / scale);
+  const labelHeight = fontSize + padY * 2;
+  const mx = (measureStart.x + endPoint.x) / 2;
+  const my = (measureStart.y + endPoint.y) / 2;
+  const labelY = my - 10 / scale;
+
+  const line = makeNS('line');
+  setA(line, { x1: measureStart.x, y1: measureStart.y, x2: endPoint.x, y2: endPoint.y, 'stroke-width': strokeW });
+  line.classList.add('measure-line');
+  line.style.pointerEvents = 'none';
+  g.appendChild(line);
+
+  [measureStart, endPoint].forEach((pt) => {
+    const dot = makeNS('circle');
+    setA(dot, { cx: pt.x, cy: pt.y, r: pointR, 'stroke-width': strokeW });
+    dot.classList.add('measure-point');
+    dot.style.pointerEvents = 'none';
+    g.appendChild(dot);
+  });
+
+  const bg = makeNS('rect');
+  setA(bg, {
+    x: mx - labelWidth / 2,
+    y: labelY - labelHeight / 2,
+    width: labelWidth,
+    height: labelHeight,
+    rx: 4 / scale,
+    'stroke-width': strokeW * 0.8
+  });
+  bg.classList.add('measure-label-bg');
+  bg.style.pointerEvents = 'none';
+  g.appendChild(bg);
+
+  const text = makeNS('text');
+  setA(text, {
+    x: mx,
+    y: labelY + fontSize * 0.33,
+    'text-anchor': 'middle',
+    'font-size': fontSize
+  });
+  text.classList.add('measure-label');
+  text.textContent = labelText;
+  g.appendChild(text);
+}
+
+function toggleMeasureMode() {
+  measureMode = !measureMode;
+  if (!measureMode) {
+    clearMeasurement();
+    syncMeasureUI();
+    renderMeasurementOverlay();
+    toast('Distance tool: OFF', 'inf');
+    return;
+  }
+  panning = false;
+  cArea.classList.remove('grabbing');
+  clearMeasurement();
+  closeEditor();
+  syncMeasureUI();
+  renderMeasurementOverlay();
+  toast('Distance tool: click point A, then point B', 'inf');
 }
 
 // render
@@ -843,6 +1090,7 @@ function renderSVG() {
 
   // Resize handles
   renderHandles();
+  renderMeasurementOverlay();
 }
 
 function renderHandles() {
@@ -981,7 +1229,7 @@ function startZoneDrag(e, zid, si) {
     }
 
     renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${z.name} @ ${z.segs[0].x},${z.segs[0].y}`);
+    showDimBadge(ev.clientX, ev.clientY, `${z.name} @ ${formatWarehouseDisplayCoord(z.segs[0].x, z.segs[0].y)}`);
   };
   const onUp = () => {
     interacting = false;
@@ -1019,7 +1267,7 @@ function startResize(e, zid, si, dir) {
     if (dir.includes('s')) { s.h = doSnap(Math.max(5, orig.h + dy)); }
 
     renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${s.w} × ${s.h} ft`);
+    showDimBadge(ev.clientX, ev.clientY, formatWarehouseDisplaySize(s.w, s.h));
   };
   const onUp = () => {
     interacting = false;
@@ -1055,7 +1303,7 @@ function startPalletDrag(e, zid, palId) {
     p.x = doSnap(mp.x - off.dx);
     p.y = doSnap(mp.y - off.dy);
     renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${p.label}: ${p.x},${p.y}`);
+    showDimBadge(ev.clientX, ev.clientY, `${p.label}: ${formatWarehouseDisplayCoord(p.x, p.y)}`);
   };
   const onUp = () => {
     interacting = false;
@@ -1091,7 +1339,7 @@ function startPalletResize(e, zid, palId, dir) {
     if (dir.includes('n')) { p.y = doSnap(orig.y + dy); p.h = doSnap(Math.max(2, orig.h - dy)); }
     if (dir.includes('s')) { p.h = doSnap(Math.max(2, orig.h + dy)); }
     renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${p.w.toFixed(0)} × ${p.h.toFixed(0)} ft`);
+    showDimBadge(ev.clientX, ev.clientY, formatWarehouseDisplaySize(p.w, p.h));
   };
   const onUp = () => {
     interacting = false;
@@ -1122,7 +1370,7 @@ function startGasLightDrag(e, glId) {
     gl.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
     if (snap) { gl.x = Math.round(gl.x / 5) * 5; gl.y = Math.round(gl.y / 5) * 5; }
     renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${gl.name}: ${Math.round(gl.x)},${Math.round(gl.y)}`);
+    showDimBadge(ev.clientX, ev.clientY, `${gl.name}: ${formatWarehouseDisplayCoord(gl.x, gl.y)}`);
   };
   const onUp = () => {
     interacting = false;
@@ -1152,6 +1400,7 @@ function hideDimBadge() { document.getElementById('dimBadge').classList.remove('
    CLICK EMPTY — DESELECT
    ================================================================= */
 svg.addEventListener('click', e => {
+  if (measureMode) return;
   if (!e.target.closest('.zr') && !e.target.closest('.pr') && !e.target.closest('.rh') && !e.target.closest('.gl-obj') && !e.target.closest('.hz-obj')) {
     sel.zoneId = null; sel.palletId = null; sel.segIdx = null; sel.gasLightId = null; sel.hazardId = null;
     if (multiSel.length > 0) { multiSel = []; updateBatchBar(); }
@@ -1161,87 +1410,132 @@ svg.addEventListener('click', e => {
 });
 
 // sidebar
+function matchesZoneSearch(zone, query) {
+  if (!query) return true;
+  return zone.name.toLowerCase().includes(query)
+    || (zone.cat || '').toLowerCase().includes(query)
+    || (zone.tags || []).some(tag => tag.toLowerCase().includes(query));
+}
+
+function buildZoneSidebarItem(zone, query, indent = false) {
+  const pct = zone.capacity > 0 ? Math.round(zone.pallets.length / zone.capacity * 100) : 0;
+  const fillColor = pct > 90 ? 'var(--red)' : pct > 60 ? 'var(--yellow)' : 'var(--green)';
+  const indentStyle = indent ? 'margin-left:16px;border-left:2px solid var(--orange);padding-left:6px' : '';
+  const hasChildren = zones.some(candidate => candidate.parentId === zone.id);
+  const parentIcon = hasChildren
+    ? '<i class="fas fa-sitemap" style="font-size:8px;color:var(--orange);margin-right:2px"></i>'
+    : '';
+  const tagsHtml = zone.tags && zone.tags.length
+    ? ` · <span style="color:var(--cyan)">${zone.tags.join(', ')}</span>`
+    : '';
+  const occupancyHtml = pct > 0
+    ? `<div class="zi-bar"><div class="zi-fill" style="width:${pct}%;background:${fillColor}"></div></div>`
+    : '';
+
+  let html = `
+    <div class="zi ${zone.id === sel.zoneId ? 'act' : ''}" onclick="selectZone('${zone.id}')" style="${indentStyle}">
+      <div class="zi-c" style="background:${zone.color}"></div>
+      <div class="zi-info">
+        <div class="zi-n">${parentIcon}${zone.name}</div>
+        <div class="zi-m">${zone.pallets.length}P · ${zone.boxes}B · ${zone.segs.length}seg${tagsHtml}</div>
+      </div>
+      ${occupancyHtml}
+    </div>
+  `;
+
+  zones
+    .filter(candidate => candidate.parentId === zone.id)
+    .forEach(child => {
+      if (!matchesZoneSearch(child, query)) return;
+      html += buildZoneSidebarItem(child, query, true);
+    });
+
+  return html;
+}
+
+function buildGasLightsSidebarHTML() {
+  if (!gasLights || gasLights.length === 0) return '';
+  const items = gasLights.map(gl => `
+    <div class="gl-item${sel.gasLightId === gl.id ? ' act' : ''}" onclick="selectGasLight('${gl.id}')">
+      <i class="fas fa-lightbulb gl-icon"></i>
+      <div class="gl-info">
+        <div class="gl-name">${esc(gl.name)}</div>
+        <div class="gl-meta"><span class="gl-dot ${gl.status}"></span> ${gl.status === 'on' ? 'Working' : 'Not working'}</div>
+      </div>
+    </div>
+  `).join('');
+  return `
+    <div class="cat-head"><div class="cat-dot" style="background:#f0b429"></div>GAS LIGHTS</div>
+    ${items}
+  `;
+}
+
+function buildHazardsSidebarHTML() {
+  if (!hazards || hazards.length === 0) return '';
+  const sideColors = { red: '#ef4444', yellow: '#f59e0b', green: '#22c55e' };
+  const items = hazards.map(hz => {
+    const color = sideColors[hz.color] || sideColors.red;
+    const severity = hz.color === 'red' ? 'Critical' : hz.color === 'yellow' ? 'Warning' : 'Info';
+    return `
+      <div class="gl-item${sel.hazardId === hz.id ? ' act' : ''}" onclick="selectHazard('${hz.id}')">
+        <i class="fas fa-exclamation-triangle" style="color:${color};font-size:12px;flex-shrink:0"></i>
+        <div class="gl-info">
+          <div class="gl-name">${esc(hz.name)}</div>
+          <div class="gl-meta"><span class="gl-dot" style="background:${color}"></span> ${severity}${hz.notes ? ' · 📝' : ''}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  return `
+    <div class="cat-head"><div class="cat-dot" style="background:#ef4444"></div>HAZARDS</div>
+    ${items}
+  `;
+}
+
+function buildSidebarEmptyStateHTML() {
+  return `
+    <div style="text-align:center;padding:30px;color:var(--text-3)">
+      <i class="fas fa-search" style="font-size:24px;display:block;margin-bottom:8px"></i>
+      Nothing found
+    </div>
+  `;
+}
+
 function renderSidebar() {
-  const q = (document.getElementById('searchInput').value || '').toLowerCase();
-  const body = document.getElementById('sbBody');
-
-  const grouped = {};
-  categories.forEach(c => { grouped[c.id] = []; });
-  grouped['_none'] = [];
-
-  zones.forEach(z => {
-    if (q && !z.name.toLowerCase().includes(q) && !(z.cat || '').toLowerCase().includes(q) && !(z.tags || []).some(t => t.toLowerCase().includes(q))) return;
-    const key = z.cat && grouped[z.cat] ? z.cat : '_none';
-    grouped[key].push(z);
+  const query = ($('searchInput').value || '').toLowerCase();
+  const grouped = { _none: [] };
+  categories.forEach(category => {
+    grouped[category.id] = [];
   });
 
-  function renderZI(z, indent) {
-    const pct = z.capacity > 0 ? Math.round(z.pallets.length / z.capacity * 100) : 0;
-    const fc = pct > 90 ? 'var(--red)' : pct > 60 ? 'var(--yellow)' : 'var(--green)';
-    const ml = indent ? 'margin-left:16px;border-left:2px solid var(--orange);padding-left:6px' : '';
-    const isParent = zones.some(zz => zz.parentId === z.id);
-    const icon = isParent ? '<i class="fas fa-sitemap" style="font-size:8px;color:var(--orange);margin-right:2px"></i>' : '';
-    let h = `<div class="zi ${z.id === sel.zoneId ? 'act' : ''}" onclick="selectZone('${z.id}')" style="${ml}">
-      <div class="zi-c" style="background:${z.color}"></div>
-      <div class="zi-info"><div class="zi-n">${icon}${z.name}</div>
-        <div class="zi-m">${z.pallets.length}P · ${z.boxes}B · ${z.segs.length}seg${z.tags && z.tags.length ? ' · <span style="color:var(--cyan)">' + z.tags.join(', ') + '</span>' : ''}</div></div>
-      ${pct > 0 ? '<div class="zi-bar"><div class="zi-fill" style="width:' + pct + '%;background:' + fc + '"></div></div>' : ''}
-    </div>`;
-      const children = zones.filter(zz => zz.parentId === z.id);
-    children.forEach(ch => {
-      if (q && !ch.name.toLowerCase().includes(q) && !(ch.cat || '').toLowerCase().includes(q) && !(ch.tags || []).some(t => t.toLowerCase().includes(q))) return;
-      h += renderZI(ch, true);
-    });
-    return h;
-  }
+  zones.forEach(zone => {
+    if (!matchesZoneSearch(zone, query)) return;
+    const bucket = zone.cat && grouped[zone.cat] ? zone.cat : '_none';
+    grouped[bucket].push(zone);
+  });
 
   let html = '';
-  categories.forEach(cat => {
-      const arr = (grouped[cat.id] || []).filter(z => !z.parentId);
-    if (arr.length === 0) return;
-    html += `<div class="cat-head"><span class="cat-dot" style="background:${cat.color}"></span>${cat.name} (${(grouped[cat.id] || []).length})</div>`;
-    arr.forEach(z => { html += renderZI(z, false); });
+  categories.forEach(category => {
+    const topLevelZones = (grouped[category.id] || []).filter(zone => !zone.parentId);
+    if (topLevelZones.length === 0) return;
+    html += `<div class="cat-head"><span class="cat-dot" style="background:${category.color}"></span>${category.name} (${(grouped[category.id] || []).length})</div>`;
+    topLevelZones.forEach(zone => {
+      html += buildZoneSidebarItem(zone, query);
+    });
   });
 
-  if (grouped['_none'].length > 0) {
-    const topNone = grouped['_none'].filter(z => !z.parentId);
-    if (topNone.length > 0) {
-      html += '<div class="cat-head">Uncategorized</div>';
-      topNone.forEach(z => { html += renderZI(z, false); });
-    }
-  }
-
-  // Gas Lights section in sidebar
-  if (gasLights && gasLights.length > 0) {
-    let glHtml = '<div class="cat-head"><div class="cat-dot" style="background:#f0b429"></div>GAS LIGHTS</div>';
-    gasLights.forEach(gl => {
-      const isAct = sel.gasLightId === gl.id;
-      glHtml += '<div class="gl-item' + (isAct ? ' act' : '') + '" onclick="selectGasLight(\'' + gl.id + '\')">';
-      glHtml += '<i class="fas fa-lightbulb gl-icon"></i>';
-      glHtml += '<div class="gl-info"><div class="gl-name">' + esc(gl.name) + '</div>';
-      glHtml += '<div class="gl-meta"><span class="gl-dot ' + gl.status + '"></span> ' + (gl.status === 'on' ? 'Working' : 'Not working') + '</div></div>';
-      glHtml += '</div>';
+  const uncategorizedZones = grouped._none.filter(zone => !zone.parentId);
+  if (uncategorizedZones.length > 0) {
+    html += '<div class="cat-head">Uncategorized</div>';
+    uncategorizedZones.forEach(zone => {
+      html += buildZoneSidebarItem(zone, query);
     });
-    html += glHtml;
   }
 
-  // Hazards section in sidebar
-  if (hazards && hazards.length > 0) {
-    const HZ_SIDE_COLORS = { red: '#ef4444', yellow: '#f59e0b', green: '#22c55e' };
-    let hzHtml = '<div class="cat-head"><div class="cat-dot" style="background:#ef4444"></div>HAZARDS</div>';
-    hazards.forEach(hz => {
-      const isAct = sel.hazardId === hz.id;
-      const c = HZ_SIDE_COLORS[hz.color] || '#ef4444';
-      hzHtml += '<div class="gl-item' + (isAct ? ' act' : '') + '" onclick="selectHazard(\'' + hz.id + '\')">';
-      hzHtml += '<i class="fas fa-exclamation-triangle" style="color:' + c + ';font-size:12px;flex-shrink:0"></i>';
-      hzHtml += '<div class="gl-info"><div class="gl-name">' + esc(hz.name) + '</div>';
-      hzHtml += '<div class="gl-meta"><span class="gl-dot" style="background:' + c + '"></span> ' + (hz.color === 'red' ? 'Critical' : hz.color === 'yellow' ? 'Warning' : 'Info') + (hz.notes ? ' · 📝' : '') + '</div></div>';
-      hzHtml += '</div>';
-    });
-    html += hzHtml;
-  }
+  html += buildGasLightsSidebarHTML();
+  html += buildHazardsSidebarHTML();
 
-body.innerHTML = html || '<div style="text-align:center;padding:30px;color:var(--text-3)"><i class="fas fa-search" style="font-size:24px;display:block;margin-bottom:8px"></i>Nothing found</div>';
+  $('sbBody').innerHTML = html || buildSidebarEmptyStateHTML();
 }
 
 function syncTopbarLayout() {
@@ -1256,31 +1550,49 @@ function syncTopbarAndFit() {
   zoomFit();
 }
 
+function buildTopChipsHTML(zoneCount, palletCount, boxCount, hazardCount, occupancyPct) {
+  const columnsChip = currentWH === 1
+    ? `<div class="chip"><i class="fas fa-columns"></i> <b>${getT4Columns().length}</b> columns</div>`
+    : '';
+  const hazardsChip = hazardCount > 0
+    ? `<div class="chip"><i class="fas fa-exclamation-triangle"></i> <b>${hazardCount}</b> hazards</div>`
+    : '';
+
+  return `
+    <div class="chip"><i class="fas fa-layer-group"></i> <b>${zoneCount}</b> zones</div>
+    <div class="chip"><i class="fas fa-pallet"></i> <b>${palletCount}</b> pallets</div>
+    <div class="chip"><i class="fas fa-box"></i> <b>${boxCount}</b> boxes</div>
+    ${columnsChip}
+    ${hazardsChip}
+    <div class="chip"><i class="fas fa-chart-pie"></i> <b>${occupancyPct}%</b></div>
+  `;
+}
+
+function buildSidebarStatsHTML(palletCount, boxCount, capacityCount, hazardCount, occupancyPct) {
+  return `
+    <div class="st-grid">
+      <div class="st-item"><div class="st-l">Pallets</div><div class="st-v">${palletCount}</div></div>
+      <div class="st-item"><div class="st-l">Boxes</div><div class="st-v">${boxCount}</div></div>
+      <div class="st-item"><div class="st-l">Capacity</div><div class="st-v">${capacityCount}</div></div>
+      <div class="st-item"><div class="st-l">Hazards</div><div class="st-v">${hazardCount}</div></div>
+    </div>
+    <div class="ov-bar">
+      <div class="ov-head"><span>Occupancy</span><b>${occupancyPct}%</b></div>
+      <div class="pbar"><div class="pfill" style="width:${occupancyPct}%"></div></div>
+    </div>
+  `;
+}
+
 function updateStats() {
   const tP = zones.reduce((s, z) => s + z.pallets.length, 0);
   const tC = zones.reduce((s, z) => s + z.capacity, 0);
   const tB = zones.reduce((s, z) => s + z.boxes, 0);
   const pct = tC > 0 ? Math.round(tP / tC * 100) : 0;
 
-  const colChip = currentWH === 1 ? '<div class="chip"><i class="fas fa-columns"></i> <b>' + getT4Columns().length + '</b> columns</div>' : '';
-  document.getElementById('topChips').innerHTML = `
-    <div class="chip"><i class="fas fa-layer-group"></i> <b>${zones.length}</b> zones</div>
-    <div class="chip"><i class="fas fa-pallet"></i> <b>${tP}</b> pallets</div>
-    <div class="chip"><i class="fas fa-box"></i> <b>${tB}</b> boxes</div>
-    ${colChip}
-    ${hazards.length > 0 ? '<div class="chip"><i class="fas fa-exclamation-triangle"></i> <b>' + hazards.length + '</b> hazards</div>' : ''}
-    <div class="chip"><i class="fas fa-chart-pie"></i> <b>${pct}%</b></div>`;
+  $('topChips').innerHTML = buildTopChipsHTML(zones.length, tP, tB, hazards.length, pct);
   requestAnimationFrame(syncTopbarLayout);
 
-  document.getElementById('sbStats').innerHTML = `
-    <div class="st-grid">
-      <div class="st-item"><div class="st-l">Pallets</div><div class="st-v">${tP}</div></div>
-      <div class="st-item"><div class="st-l">Boxes</div><div class="st-v">${tB}</div></div>
-      <div class="st-item"><div class="st-l">Capacity</div><div class="st-v">${tC}</div></div>
-      <div class="st-item"><div class="st-l">Hazards</div><div class="st-v">${hazards.length}</div></div>
-    </div>
-    <div class="ov-bar"><div class="ov-head"><span>Occupancy</span><b>${pct}%</b></div>
-      <div class="pbar"><div class="pfill" style="width:${pct}%"></div></div></div>`;
+  $('sbStats').innerHTML = buildSidebarStatsHTML(tP, tB, tC, hazards.length, pct);
 }
 
 // zone editor
@@ -1291,54 +1603,93 @@ function selectZone(id) {
   openZoneEditor(id);
 }
 
+function buildZoneCategoryOptions(zone) {
+  const baseOption = '<option value="">— No category —</option>';
+  const categoryOptions = categories.map(category => `
+    <option value="${category.id}" ${zone.cat === category.id ? 'selected' : ''}>${category.name}</option>
+  `).join('');
+  return baseOption + categoryOptions;
+}
+
+function buildZoneParentOptions(zone) {
+  const childIds = zones.filter(candidate => candidate.parentId === zone.id).map(candidate => candidate.id);
+  const baseOption = '<option value="">— None (top-level) —</option>';
+  const parentOptions = zones
+    .filter(candidate => candidate.id !== zone.id && !childIds.includes(candidate.id) && candidate.parentId !== zone.id)
+    .map(candidate => `
+      <option value="${candidate.id}" ${zone.parentId === candidate.id ? 'selected' : ''}>${candidate.name}</option>
+    `)
+    .join('');
+  return baseOption + parentOptions;
+}
+
+function buildZoneSubcategoryOptions(zone) {
+  const activeCategory = categories.find(category => category.id === zone.cat);
+  const baseOption = '<option value="">— None —</option>';
+  if (!activeCategory || !activeCategory.subs) return baseOption;
+  const subcategoryOptions = activeCategory.subs.map(subcategory => `
+    <option value="${subcategory}" ${zone.name === subcategory ? 'selected' : ''}>${subcategory}</option>
+  `).join('');
+  return baseOption + subcategoryOptions;
+}
+
+function buildZoneSegmentListHTML(zone) {
+  return zone.segs.map((segment, index) => `
+    <div class="seg-item ${sel.segIdx === index ? 'act' : ''}" onclick="sel.segIdx=${index};renderAll();">
+      <span>Segment ${index + 1}</span>
+      <span class="seg-dims">${segment.w}×${segment.h} @ ${segment.x},${segment.y}</span>
+    </div>
+  `).join('');
+}
+
+function buildZonePalletListHTML(zone, zoneId) {
+  return zone.pallets.map(pallet => `
+    <div class="pal-item ${sel.palletId === pallet.id ? 'act' : ''}" onclick="sel.palletId='${pallet.id}';renderAll();openZoneEditor('${zoneId}');">
+      <span><b>${pallet.label}</b></span>
+      <span class="seg-dims">${Math.round(pallet.w)}×${Math.round(pallet.h)}</span>
+    </div>
+  `).join('');
+}
+
+function buildTent4CapacityCardHTML(zoneId, segments) {
+  if (currentWH !== 1) return '';
+  const capacityResult = calcMaxPallets(segments);
+  return `
+    <div style="background:linear-gradient(135deg,var(--bg-3),var(--bg-2));border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px;text-align:center">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-3);margin-bottom:6px">MAX PALLETS (4×4 ft)</div>
+      <div style="font-family:var(--mono);font-size:32px;font-weight:700;color:var(--orange);line-height:1">${capacityResult.count}</div>
+      <div style="font-size:11px;color:var(--text-2);margin-top:4px">pallets fit</div>
+      <div style="display:flex;justify-content:center;gap:14px;margin-top:8px;font-size:11px;font-family:var(--mono);color:var(--text-3)">
+        <span>Columns: ${capacityResult.columnsInZone}</span>
+        <span>Blocked: ${capacityResult.blocked}</span>
+      </div>
+      <button class="btn btn-g" style="margin-top:8px;width:100%;justify-content:center;font-size:11px" onclick="autoSetCapacity('${zoneId}',${capacityResult.count})"><i class="fas fa-magic"></i> Set as Capacity</button>
+    </div>
+  `;
+}
+
 function openZoneEditor(id) {
   const z = zones.find(zz => zz.id === id);
   if (!z) return;
-  const ed = document.getElementById('editor');
-  document.getElementById('edTitle').textContent = z.name;
+  const ed = $('editor');
+  $('edTitle').textContent = z.name;
 
-  let catOpts = '<option value="">— No category —</option>' + categories.map(c =>
-    `<option value="${c.id}" ${z.cat === c.id ? 'selected' : ''}>${c.name}</option>`
-  ).join('');
+  const categoryOptions = buildZoneCategoryOptions(z);
+  const parentOptions = buildZoneParentOptions(z);
+  const subcategoryOptions = buildZoneSubcategoryOptions(z);
+  const segmentsHtml = buildZoneSegmentListHTML(z);
+  const palletsHtml = buildZonePalletListHTML(z, id);
+  const capacityCardHtml = buildTent4CapacityCardHTML(id, z.segs);
 
-  const childIds = zones.filter(zz => zz.parentId === id).map(zz => zz.id);
-  let parentOpts = '<option value="">— None (top-level) —</option>' + zones.filter(zz =>
-    zz.id !== id && !childIds.includes(zz.id) && zz.parentId !== id
-  ).map(zz =>
-    `<option value="${zz.id}" ${z.parentId === zz.id ? 'selected' : ''}>${zz.name}</option>`
-  ).join('');
-
-  const activeCat = categories.find(c => c.id === z.cat);
-  let subOpts = '<option value="">— None —</option>';
-  if (activeCat && activeCat.subs) {
-    subOpts += activeCat.subs.map(s =>
-      `<option value="${s}" ${z.name === s ? 'selected' : ''}>${s}</option>`
-    ).join('');
-  }
-
-  let segsHtml = z.segs.map((s, i) =>
-    `<div class="seg-item ${sel.segIdx === i ? 'act' : ''}" onclick="sel.segIdx=${i};renderAll();">
-      <span>Segment ${i + 1}</span>
-      <span class="seg-dims">${s.w}×${s.h} @ ${s.x},${s.y}</span>
-    </div>`
-  ).join('');
-
-  let palsHtml = z.pallets.map(p =>
-    `<div class="pal-item ${sel.palletId === p.id ? 'act' : ''}" onclick="sel.palletId='${p.id}';renderAll();openZoneEditor('${id}');">
-      <span><b>${p.label}</b></span>
-      <span class="seg-dims">${Math.round(p.w)}×${Math.round(p.h)}</span>
-    </div>`
-  ).join('');
-
-  document.getElementById('edBody').innerHTML = `
+  $('edBody').innerHTML = `
     <div class="fg"><label>Category</label>
-      <select id="eCat" onchange="changeCatAndRefresh('${id}',this.value)">${catOpts}</select></div>
+      <select id="eCat" onchange="changeCatAndRefresh('${id}',this.value)">${categoryOptions}</select></div>
     <div class="fg"><label>Subcategory / Type</label>
-      <select id="eSub" onchange="changeSubName('${id}',this.value)">${subOpts}</select></div>
+      <select id="eSub" onchange="changeSubName('${id}',this.value)">${subcategoryOptions}</select></div>
     <div class="fg"><label>Name (editable)</label>
       <input type="text" id="eName" value="${esc(z.name)}" onchange="applyZoneField('${id}','name',this.value)"></div>
     <div class="fg"><label><i class="fas fa-sitemap" style="color:var(--orange)"></i> Parent Zone</label>
-      <select id="eParent" onchange="changeParentZone('${id}',this.value)">${parentOpts}</select></div>
+      <select id="eParent" onchange="changeParentZone('${id}',this.value)">${parentOptions}</select></div>
     <div class="fr">
       <div class="fg"><label>Color</label>
         <input type="color" id="eColor" value="${z.color}" onchange="applyZoneField('${id}','color',this.value)"></div>
@@ -1347,19 +1698,7 @@ function openZoneEditor(id) {
     </div>
     <div class="fg"><label>Boxes</label>
       <input type="number" id="eBox" min="0" value="${z.boxes}" onchange="applyZoneField('${id}','boxes',+this.value)"></div>
-    ${currentWH === 1 ? (() => {
-      const capResult = calcMaxPallets(z.segs);
-      return '<div style="background:linear-gradient(135deg,var(--bg-3),var(--bg-2));border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px;text-align:center">' +
-        '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-3);margin-bottom:6px">MAX PALLETS (4×4 ft)</div>' +
-        '<div style="font-family:var(--mono);font-size:32px;font-weight:700;color:var(--orange);line-height:1">' + capResult.count + '</div>' +
-        '<div style="font-size:11px;color:var(--text-2);margin-top:4px">pallets fit</div>' +
-        '<div style="display:flex;justify-content:center;gap:14px;margin-top:8px;font-size:11px;font-family:var(--mono);color:var(--text-3)">' +
-          '<span>Columns: ' + capResult.columnsInZone + '</span>' +
-          '<span>Blocked: ' + capResult.blocked + '</span>' +
-        '</div>' +
-        '<button class="btn btn-g" style="margin-top:8px;width:100%;justify-content:center;font-size:11px" onclick="autoSetCapacity(\'' + id + '\',' + capResult.count + ')"><i class="fas fa-magic"></i> Set as Capacity</button>' +
-      '</div>';
-    })() : ''}
+    ${capacityCardHtml}
     <div class="fg"><label><i class="fas fa-sticky-note" style="color:var(--yellow)"></i> Notes</label>
       <textarea id="eNotes" rows="2" style="resize:vertical;min-height:40px;font-size:13px;padding:8px 10px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-1);font-family:var(--font);width:100%;outline:none"
         onchange="applyZoneField('${id}','notes',this.value)"
@@ -1385,7 +1724,7 @@ function openZoneEditor(id) {
         <span><i class="fas fa-shapes"></i> Segments (${z.segs.length})</span>
         <button class="btn" style="padding:4px 8px;font-size:11px" onclick="addSegment('${id}')"><i class="fas fa-plus"></i> Block</button>
       </div>
-      ${segsHtml}
+      ${segmentsHtml}
       ${sel.segIdx != null && z.segs[sel.segIdx] ? renderSegEditor(z, sel.segIdx) : ''}
     </div>
 
@@ -1483,12 +1822,12 @@ function openZoneEditor(id) {
           <button class="btn" style="padding:4px 10px;font-size:11px" onclick="document.getElementById('quickFillForm').style.display='none'"><i class="fas fa-times"></i></button>
         </div>
       </div>
-      ${palsHtml}
+      ${palletsHtml}
       ${sel.palletId ? renderPalEditor(z) : ''}
     </div>
   `;
 
-  document.getElementById('edFoot').innerHTML = `
+  $('edFoot').innerHTML = `
     <button class="btn btn-d" onclick="deleteZone('${id}')"><i class="fas fa-trash"></i> Delete</button>
     <button class="btn btn-p" onclick="closeEditor()"><i class="fas fa-check"></i> Done</button>
   `;
@@ -2524,12 +2863,15 @@ function loadLayout() {
             && !d.warehouses.some(slot => slot && slot.warehouse && slot.warehouse.key);
           currentWH = Number(d.currentWH || 0);
           if (hasLegacyThreeSlotLayout) currentWH = Math.max(0, currentWH - 1);
-          if (![0, 1].includes(currentWH) || !warehouseData[currentWH]) {
-            currentWH = warehouseData[1] ? 1 : 0;
+          if (!isValidWarehouseIndex(currentWH) || !warehouseData[currentWH]) {
+            currentWH = getFirstAvailableWarehouseIndex(warehouseData);
           }
           try { localStorage.setItem('whsims.currentWH', String(currentWH)); } catch (e2) {}
           if (warehouseData[currentWH]) loadSlotToCurrent(warehouseData[currentWH]);
         } else if (d.zones) {
+          if (d.warehouse && typeof d.warehouse.name === 'string' && d.warehouse.name.trim()) {
+            WH_CONFIGS[currentWH].name = d.warehouse.name.trim().slice(0, 32);
+          }
           const normalizedSlot = normalizeSlotToCurrentWarehouse({
             zones: d.zones,
             categories: d.categories,
@@ -2608,11 +2950,20 @@ function randColor() {
    ================================================================= */
 document.addEventListener('keydown', e => {
   if (TUT.active) return; // let tutorial handler manage keys
+  if (measureMode && e.key === 'Escape') {
+    e.preventDefault();
+    toggleMeasureMode();
+    return;
+  }
   if (e.key === 'Escape') {
     if (document.body.classList.contains('pres')) { togglePresentation(); return; }
     if (document.getElementById('modalBg').classList.contains('show')) closeModal();
     else if (document.getElementById('editor').classList.contains('open')) closeEditor();
     else { sel.zoneId = null; sel.palletId = null; renderAll(); }
+  }
+  if ((e.key === 'm' || e.key === 'M') && !e.target.closest('input,select,textarea')) {
+    e.preventDefault();
+    toggleMeasureMode();
   }
   if (e.key === 'Delete' && sel.zoneId && !e.target.closest('input,select,textarea')) {
     if (multiSel.length > 0) {
@@ -2911,7 +3262,7 @@ function setSyncStatus(text, color) {
 function buildServerLayoutPayload() {
   warehouseData[currentWH] = saveCurrentToSlot();
   return {
-    warehouse: WH_CONFIGS[currentWH] || WH,
+    warehouse: { ...(WH_CONFIGS[currentWH] || WH) },
     warehouses: deepClone(warehouseData).map((slot, idx) => {
       if (!slot) return slot;
       slot.warehouse = { ...WH_CONFIGS[idx] };
@@ -2924,9 +3275,12 @@ function applyServerLayout(layout) {
   if (!layout || !Array.isArray(layout.warehouses)) return false;
   const normalized = normalizeServerLayout(layout);
   warehouseData = normalized.warehouses;
-  if (!warehouseData[currentWH]) currentWH = warehouseData[1] ? 1 : 0;
+  if (!warehouseData[currentWH]) currentWH = getFirstAvailableWarehouseIndex(warehouseData);
   try { localStorage.setItem('whsims.currentWH', String(currentWH)); } catch (e) {}
   if (warehouseData[currentWH]) loadSlotToCurrent(warehouseData[currentWH]);
+  measureMode = false;
+  clearMeasurement();
+  syncMeasureUI();
   applyWarehouseTheme(currentWH);
   suppressAutoSave = true;
   try {
@@ -3287,7 +3641,7 @@ function startHazardDrag(e, hzId) {
     hz.y = Math.max(0, Math.min(WH.h, mp.y - off.dy));
     if (snap) { hz.x = Math.round(hz.x / 5) * 5; hz.y = Math.round(hz.y / 5) * 5; }
     renderSVG();
-    showDimBadge(ev.clientX, ev.clientY, `${hz.name}: ${Math.round(hz.x)},${Math.round(hz.y)}`);
+    showDimBadge(ev.clientX, ev.clientY, `${hz.name}: ${formatWarehouseDisplayCoord(hz.x, hz.y)}`);
   };
   const onUp = () => {
     interacting = false;
@@ -3329,11 +3683,11 @@ function renderAll() {
 
 // init
 async function init() {
+  applyWarehouseTheme(currentWH);
   renderSVG();
   renderSidebar();
   updateStats();
   document.getElementById('snapBtn').classList.add('on');
-  applyWarehouseTheme(currentWH);
   setTimeout(syncTopbarAndFit, 100);
   setSyncStatus('Sign in required', '#6b7280');
   requestAnimationFrame(syncTopbarLayout);
@@ -3380,7 +3734,7 @@ const tutSteps = [
     target: '#whTabs',
     icon: 'fa-layer-group',
     title: 'Tent Tabs',
-    text: 'Switch between <strong>Tent\u20113</strong> (200\u00d785 ft) and <strong>Tent\u20114</strong> (800\u00d7260 ft). Each tent has its own zones, pallets, and layout saved separately.',
+    text: 'Switch between your tents here. <strong>Tent\u20113</strong> and <strong>Tent\u20115</strong> share the compact footprint, while <strong>Tent\u20114</strong> is the large 800\u00d7260 ft layout. <strong>Double-click a tab</strong> to rename it.',
     spotlight: 'el',
     cardPos: 'below',
   },
